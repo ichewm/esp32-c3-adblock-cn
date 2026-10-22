@@ -53,7 +53,7 @@ GitHub 可选作镜像。
 
 1. **开通 Gitee Go**（免费赠 200 分钟/仓库，永久有效；未开通时报「构建时长余额不足」）：
    打开 `https://gitee.com/hewmbj/esp32-c3-adblock-cn/gitee_go` 点「开通」。
-2. **配置推送令牌**：仓库「管理」→「环境变量设置」，添加 `GITEE_TOKEN` =
+2. **配置推送令牌**：仓库「管理」→「环境变量设置」，添加 `PUSH_TOKEN` =
    你的 Gitee 私人令牌（需 projects 权限），供流水线把新列表推回 dist 分支。
 
 之后可手动触发验证：

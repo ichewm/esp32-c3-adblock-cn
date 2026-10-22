@@ -1,6 +1,6 @@
 # ========================================================
 # 每周自动重建中国区广告规则并发布到 dist 分支
-# 依赖: 仓库「管理」→「环境变量设置」配置 GITEE_TOKEN
+# 依赖: 仓库「管理」→「环境变量设置」配置 PUSH_TOKEN
 #       (Gitee 私人令牌, projects 权限; 新建: gitee.com/profile/personal_access_tokens)
 # 产物: https://gitee.com/hewmbj/esp32-c3-adblock-cn/raw/dist/blocklist.bin
 #       设备固件已内置此 URL, 每 168 小时自动拉取

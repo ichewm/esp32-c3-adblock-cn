@@ -15,9 +15,10 @@ import sys
 import urllib.request
 
 OWNER_REPO = sys.argv[1] if len(sys.argv) > 1 else "hewmbj/esp32-c3-adblock-cn"
-TOKEN = os.environ.get("GITEE_TOKEN")
+# Gitee 通用变量不允许 GITEE_ 前缀（系统保留），所以用 PUSH_TOKEN
+TOKEN = (os.environ.get("PUSH_TOKEN") or os.environ.get("GITEE_TOKEN") or "").strip()
 if not TOKEN:
-    print("GITEE_TOKEN 未配置：仓库「管理 → 环境变量设置」添加 GITEE_TOKEN（私人令牌，需 projects 权限）")
+    print("PUSH_TOKEN 未配置：仓库「管理 → 流水线 → 通用变量」添加 PUSH_TOKEN（私人令牌，需 projects 权限）")
     sys.exit(1)
 
 api = f"https://gitee.com/api/v5/repos/{OWNER_REPO}/contents/blocklist.bin"

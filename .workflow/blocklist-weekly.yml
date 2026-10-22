@@ -11,7 +11,7 @@ name: blocklist-weekly
 displayName: '每周重建中国区规则'
 triggers:
   schedule:
-    - cron: '0 10 ? * 3'
+    - cron: '0 0 10 ? * 3'
 stages:
   - stage:
     name: build-stage

@@ -13,32 +13,43 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-SOURCES=(
-  "https://anti-ad.net/domains.txt"
-  "https://raw.githubusercontent.com/VeleSila/yhosts/master/hosts"
-  "https://easylist-downloads.adblockplus.org/easylistchina.txt"
-  "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"
-)
 
 # 0x120000 = 1,179,648B LittleFS 分区；留余量后的安全上限（与 CI 同比例）
 MAX_BYTES=1100000
 
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 
-python3 - "$TMP" "${SOURCES[@]}" <<'EOF'
-import os, pathlib, sys, time, urllib.request
+# 多镜像候选：本地（有代理）首个即中；Gitee Go 云节点在国内，raw.githubusercontent
+# 不通时会超时切到 jsdelivr / gh 代理镜像（实测两者内容一致）。
+python3 - "$TMP" <<'EOF'
+import pathlib, socket, sys, urllib.request
+socket.setdefaulttimeout(25)
+SOURCES = [
+    ("antiad.txt", ["https://anti-ad.net/domains.txt"]),
+    ("yhosts.txt", [
+        "https://raw.githubusercontent.com/VeleSila/yhosts/master/hosts",
+        "https://cdn.jsdelivr.net/gh/VeleSila/yhosts@master/hosts",
+        "https://ghfast.top/https://raw.githubusercontent.com/VeleSila/yhosts/master/hosts"]),
+    ("easylistchina.txt", [
+        "https://easylist-downloads.adblockplus.org/easylistchina.txt",
+        "https://raw.githubusercontent.com/easylist/easylistchina/master/easylistchina.txt",
+        "https://cdn.jsdelivr.net/gh/easylist/easylistchina@master/easylistchina.txt"]),
+    ("sb.txt", [
+        "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts",
+        "https://cdn.jsdelivr.net/gh/StevenBlack/hosts@master/hosts",
+        "https://ghfast.top/https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"]),
+]
 dest_dir = pathlib.Path(sys.argv[1])
-for url in sys.argv[2:]:
-    dest = dest_dir / os.path.basename(url.split('?')[0])
-    for attempt in range(3):
+for name, candidates in SOURCES:
+    for url in candidates:
         try:
-            urllib.request.urlretrieve(url, dest)
-            print(f'下载: {url} ({dest.stat().st_size} B)')
+            urllib.request.urlretrieve(url, dest_dir / name)
+            print(f'下载: {url} ({(dest_dir / name).stat().st_size} B)')
             break
         except Exception as e:
-            if attempt == 2:
-                raise SystemExit(f'!! 下载失败 {url}: {e}')
-            time.sleep(2)
+            print(f'  !! {url} 失败: {e}')
+    else:
+        raise SystemExit(f'!! 所有镜像均失败: {name}')
 EOF
 
 python3 tools/build_blocklist.py data/blocklist.bin "$TMP"/*

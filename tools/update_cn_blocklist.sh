@@ -9,7 +9,7 @@
 #   - yhosts:    国内补充
 #   - EasyList China: 国内补充，只取 DNS 可表达的 ||domain^ 规则
 #   - StevenBlack: 国外基线（广告+恶意软件）。不要国外规则就注释掉这一行。
-# 注: GitHub 源在国内直连不稳；本机有代理时 curl 自动走 https_proxy。
+# 下载用 python urllib（本地/CI 都不依赖 curl）；需要代理的机器走 https_proxy 环境变量。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -24,22 +24,31 @@ SOURCES=(
 MAX_BYTES=1100000
 
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
-FILES=()
-for url in "${SOURCES[@]}"; do
-  f="$TMP/$(basename "$url")"
-  echo "下载: $url"
-  curl -sLf --retry 3 --max-time 120 -o "$f" "$url"
-  FILES+=("$f")
-done
 
-python3 tools/build_blocklist.py data/blocklist.bin "${FILES[@]}"
+python3 - "$TMP" "${SOURCES[@]}" <<'EOF'
+import os, pathlib, sys, time, urllib.request
+dest_dir = pathlib.Path(sys.argv[1])
+for url in sys.argv[2:]:
+    dest = dest_dir / os.path.basename(url.split('?')[0])
+    for attempt in range(3):
+        try:
+            urllib.request.urlretrieve(url, dest)
+            print(f'下载: {url} ({dest.stat().st_size} B)')
+            break
+        except Exception as e:
+            if attempt == 2:
+                raise SystemExit(f'!! 下载失败 {url}: {e}')
+            time.sleep(2)
+EOF
+
+python3 tools/build_blocklist.py data/blocklist.bin "$TMP"/*
 
 SIZE=$(stat -f%z data/blocklist.bin 2>/dev/null || stat -c%s data/blocklist.bin)
 if [ "$SIZE" -gt "$MAX_BYTES" ]; then
   echo "错误: blocklist.bin ($SIZE B) 超过分区安全上限 ($MAX_BYTES B)，未部署。请删减源后重试。" >&2
   exit 1
 fi
-echo "✓ 大校验通过: $SIZE / $MAX_BYTES 字节 ($(( SIZE * 100 / MAX_BYTES ))% 预算)"
+echo "✓ 大小校验通过: $SIZE / $MAX_BYTES 字节 ($(( SIZE * 100 / MAX_BYTES ))% 预算)"
 
 # 可选：直接推送到已部署的设备（等价于 dashboard 的 Blocklist -> Upload）
 if [ "${1:-}" != "" ]; then
@@ -47,6 +56,19 @@ if [ "${1:-}" != "" ]; then
   PW=$(sed -n 's/.*WEB_PASS = "\([^"]*\)".*/\1/p' src/secrets.h)
   USER=$(sed -n 's/.*WEB_USER = "\([^"]*\)".*/\1/p' src/secrets.h)
   echo "推送到设备 http://$IP/upload ..."
-  curl -s -u "$USER:$PW" -H "X-Requested-With: c3-adblock" \
-       -F "file=@data/blocklist.bin" "http://$IP/upload" && echo
+  python3 - "$USER" "$PW" "$IP" <<'EOF'
+import base64, json, sys, urllib.request, uuid
+user, pw, ip = sys.argv[1:4]
+bin_ = open('data/blocklist.bin', 'rb').read()
+boundary = uuid.uuid4().hex
+body = (f'--{boundary}\r\nContent-Disposition: form-data; name="file"; '
+        f'filename="blocklist.bin"\r\nContent-Type: application/octet-stream\r\n\r\n'
+        ).encode() + bin_ + f'\r\n--{boundary}--\r\n'.encode()
+req = urllib.request.Request(
+    f'http://{ip}/upload', data=body, method='POST',
+    headers={'Content-Type': f'multipart/form-data; boundary={boundary}',
+             'Authorization': 'Basic ' + base64.b64encode(f'{user}:{pw}'.encode()).decode(),
+             'X-Requested-With': 'c3-adblock'})
+print('设备响应:', urllib.request.urlopen(req, timeout=120).read().decode())
+EOF
 fi

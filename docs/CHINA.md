@@ -24,14 +24,27 @@
 合并去重后 **~161k 条 / ~807KB / 0 哈希碰撞**，分区容量约 220k 条（余量 ~35%）。
 neohosts 已停更（404），AdGuard 中文过滤器对 DNS 无价值，均不采用。
 
-## 更新规则的三个途径
+## 托管与更新（Gitee 为主）
 
-1. **局域网直推（推荐）**：在有代理的电脑上 `tools/update_cn_blocklist.sh <设备IP>`，
+本分支以 [Gitee](https://gitee.com) 为主阵地（国内直连、CI/规则分发都可达），
+GitHub 可选作镜像。
+
+1. **局域网直推（最快）**：在有代理的电脑上 `tools/update_cn_blocklist.sh <设备IP>`，
    一条命令完成 下载→构建→推送（走 dashboard 的 `/upload`，Basic Auth + CSRF 头）。
-2. **手动上传**：跑脚本构建出 `data/blocklist.bin`，dashboard → Blocklist → Upload。
-3. **设备定时自拉**：把构建好的 bin 放到国内可达的 HTTP 地址（阿里云 OSS / 家里 NAS /
-   软路由），dashboard → Remote auto-update 填 `http://<你的地址>/blocklist.bin`。
-   ⚠️ GitHub release 地址（含本仓库 CI 产物）大陆直连基本拉不动，别用它做设备自更新。
+2. **设备定时自拉（全自动，走 Gitee）**：
+   ```bash
+   # 首次：在 Gitee 建好仓库后
+   git remote add gitee https://gitee.com/<你的用户名>/esp32-c3-adblock-cn.git
+   git push -u gitee main
+   tools/publish_gitee.sh        # 构建列表并推到 blocklist 分支
+   ```
+   然后在设备 dashboard → Remote auto-update 填
+   `https://gitee.com/<你的用户名>/esp32-c3-adblock-cn/raw/dist/blocklist.bin`，
+   间隔建议 168 小时。Mac 上可加 cron 每周自动跑 `publish_gitee.sh`。
+   实测 Gitee raw 链路匿名可下载（302 到签名 URL，固件已开重定向跟随）；
+   **不要用 Gitee release 附件**（防盗链可能要求登录，固件无法登录）；
+   也**不要用 GitHub release 地址**（大陆基本拉不动）。
+3. **手动上传**：dashboard → Blocklist → Upload。
 
 ## 部署
 

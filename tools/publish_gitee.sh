@@ -7,12 +7,12 @@
 #   - release 附件匿名下载不可靠(防盗链可能要求登录)，固件只会简单 GET，无法登录
 #
 # 用法:
-#   git remote add gitee https://gitee.com/<你的用户名>/esp32-c3-adblock-cn.git   # 首次
+#   git remote add gitee https://gitee.com/hewmbj/esp32-c3-adblock-cn.git   # 首次
 #   tools/publish_gitee.sh                       # 构建 + 推送 blocklist 分支
 #   tools/publish_gitee.sh https://gitee.com/u/r.git  # 没配 remote 时直接传 URL
 #
 # 之后在设备 dashboard -> Remote auto-update 填:
-#   https://gitee.com/<你的用户名>/esp32-c3-adblock-cn/raw/dist/blocklist.bin
+#   https://gitee.com/hewmbj/esp32-c3-adblock-cn/raw/dist/blocklist.bin
 #   建议间隔 168 小时(每周)。Mac 本地也可加 cron 每周自动跑本脚本。
 set -euo pipefail
 cd "$(dirname "$0")/.."

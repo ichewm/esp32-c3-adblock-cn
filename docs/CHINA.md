@@ -34,12 +34,12 @@ GitHub 可选作镜像。
 2. **设备定时自拉（全自动，走 Gitee）**：
    ```bash
    # 首次：在 Gitee 建好仓库后
-   git remote add gitee https://gitee.com/<你的用户名>/esp32-c3-adblock-cn.git
+   git remote add gitee https://gitee.com/hewmbj/esp32-c3-adblock-cn.git
    git push -u gitee main
    tools/publish_gitee.sh        # 构建列表并推到 blocklist 分支
    ```
    然后在设备 dashboard → Remote auto-update 填
-   `https://gitee.com/<你的用户名>/esp32-c3-adblock-cn/raw/dist/blocklist.bin`，
+   `https://gitee.com/hewmbj/esp32-c3-adblock-cn/raw/dist/blocklist.bin`，
    间隔建议 168 小时。Mac 上可加 cron 每周自动跑 `publish_gitee.sh`。
    实测 Gitee raw 链路匿名可下载（302 到签名 URL，固件已开重定向跟随）；
    **不要用 Gitee release 附件**（防盗链可能要求登录，固件无法登录）；

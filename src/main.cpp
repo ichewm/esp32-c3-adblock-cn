@@ -62,8 +62,11 @@ static const int MAX_BAN = 32;
 uint32_t bannedIP[MAX_BAN]; int numBanned = 0;
 
 // remote blocklist auto-update
-String updateUrl = "";              // URL of a prebuilt blocklist.bin (e.g. GitHub release asset)
-uint32_t updateIntervalH = 24;      // hours between auto-fetches
+// CN fork: defaults are baked in at flash time — a freshly flashed device pulls the
+// Gitee-hosted China list weekly with zero dashboard config. /update.cfg (written
+// by /setupdate) still overrides these when present.
+String updateUrl = "https://gitee.com/hewmbj/esp32-c3-adblock-cn/raw/dist/blocklist.bin";
+uint32_t updateIntervalH = 168;      // hours between auto-fetches (weekly)
 uint32_t lastCheckMs = 0;
 String updateStatus = "never";
 

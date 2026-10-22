@@ -1,0 +1,32 @@
+# ========================================================
+# 每周自动重建中国区广告规则并发布到 dist 分支
+# 依赖: 仓库「管理」→「环境变量设置」里配置 GITEE_TOKEN
+#       (值为 Gitee 私人令牌, 需要 projects 权限, 用于推回 dist 分支)
+# 产物: https://gitee.com/hewmbj/esp32-c3-adblock-cn/raw/dist/blocklist.bin
+#       设备固件已内置此 URL, 每 168 小时自动拉取
+# 定时: 每周二北京时间 10:00 (Gitee Go cron: 周日=1, 周二=3)
+# ========================================================
+version: 1.0
+name: blocklist-weekly
+displayName: '每周重建中国区规则'
+triggers:
+  schedule:
+    - cron: '0 10 ? * 3'
+stages:
+  - stage:
+    name: build-stage
+    displayName: '构建并发布'
+    strategy: fast
+    steps:
+      - step: shell@agent
+        name: build-publish
+        displayName: '构建并发布 blocklist'
+        commands: |
+          set -e
+          python3 --version
+          git config user.name "blocklist-bot"
+          git config user.email "blocklist-bot@users.noreply.gitee.com"
+          git remote set-url origin "https://hewmbj:${GITEE_TOKEN}@gitee.com/hewmbj/esp32-c3-adblock-cn.git"
+          GITEE_REMOTE=origin tools/publish_gitee.sh
+          echo "--- 校验 dist 分支 ---"
+          git fetch origin dist && git show origin:dist:blocklist.bin | head -c 20 | xxd | head -1

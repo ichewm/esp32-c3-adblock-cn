@@ -22,8 +22,9 @@
 
 // ---- config ----
 #ifndef UPSTREAM_IP
-#define UPSTREAM_IP 9, 9, 9, 9                    // Quad9
-#endif
+#define UPSTREAM_IP 223, 5, 5, 5                 // AliDNS — domestic resolver for CN
+#endif                                              // (was Quad9 9.9.9.9: slow from CN and
+                                                    //  GFW-poisonable over plain UDP:53)
 #ifndef UPSTREAM_PORT
 #define UPSTREAM_PORT 53
 #endif

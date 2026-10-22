@@ -1,9 +1,11 @@
 # Dual-OTA layout for 4MB flash: two app slots (firmware OTA) + LittleFS (blocklist).
-# Firmware ~1.24MB (TLS+HTTP+OTA), so slots are 1.3125MB (~134KB headroom each).
-# That leaves 1.3125MB for the blocklist (~250k domains @ 5 bytes).
+# 2026-10: arduino-esp32 core grew past the old 0x150000 slots (issue #48), so slots
+# are 0x160000 (1.406MB). Blocklist partition shrunk to 0x120000 (1.125MB -> 235k
+# domains @ 5 bytes) — still 2x the ~111k-entry anti-AD list, and custom/banned/
+# update.cfg files are tiny. Ends at 0x3F0000, 64KB spare at the top of flash.
 # Name,     Type, SubType, Offset,   Size
 nvs,        data, nvs,     0x9000,   0x5000
 otadata,    data, ota,     0xe000,   0x2000
-app0,       app,  ota_0,   0x10000,  0x150000
-app1,       app,  ota_1,   0x160000, 0x150000
-spiffs,     data, spiffs,  0x2b0000, 0x150000
+app0,       app,  ota_0,   0x10000,  0x160000
+app1,       app,  ota_1,   0x170000, 0x160000
+spiffs,     data, spiffs,  0x2d0000, 0x120000

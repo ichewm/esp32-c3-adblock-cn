@@ -1,0 +1,49 @@
+name: blocklist-cn
+
+# Rebuilds the China-first blocklist weekly and publishes it as a release asset:
+#   https://github.com/<you>/esp32-c3-adblock/releases/download/blocklist-cn/blocklist.bin
+# Sources: anti-AD (CN aggregate, daily) + yhosts + EasyList China (|| rules)
+#          + StevenBlack base (foreign baseline — trim in tools/update_cn_blocklist.sh).
+# Note: GitHub runners are outside CN so all sources download fine here; mainland
+# devices may not be able to fetch this release URL directly — push over LAN instead
+# (tools/update_cn_blocklist.sh <device-ip>) or mirror the asset domestically.
+on:
+  schedule:
+    - cron: "23 5 * * 1"   # Mondays 05:23 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build China-first blocklist
+        run: tools/update_cn_blocklist.sh
+      - name: Sanity checks
+        run: |
+          size=$(stat -c%s data/blocklist.bin)
+          echo "size=$size bytes"
+          test $((size % 5)) -eq 0                  # whole 40-bit entries
+          test "$size" -gt 600000                   # >120k entries (anti-AD ~111k + supplements)
+          test "$size" -le 1100000                  # fits the 0x120000 LittleFS partition
+      - name: Publish to the 'blocklist-cn' release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          entries=$(( $(stat -c%s data/blocklist.bin) / 5 ))
+          notes="Auto-built $(date -u +%F) — ${entries} entries (anti-AD + yhosts + EasyList China + StevenBlack base).
+
+          Mainland devices: fetch this URL only if GitHub is reachable; otherwise push via LAN:
+          tools/update_cn_blocklist.sh <device-ip>"
+          if gh release view blocklist-cn >/dev/null 2>&1; then
+            gh release edit blocklist-cn --notes "$notes"
+          else
+            gh release create blocklist-cn --title "Weekly China blocklist" --notes "$notes" --latest=false
+          fi
+          gh release upload blocklist-cn data/blocklist.bin --clobber

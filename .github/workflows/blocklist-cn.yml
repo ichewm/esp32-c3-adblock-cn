@@ -1,15 +1,15 @@
 name: blocklist-cn
 
-# Rebuilds the China-first blocklist weekly and publishes it as a release asset:
-#   https://github.com/<you>/esp32-c3-adblock/releases/download/blocklist-cn/blocklist.bin
-# Sources: anti-AD (CN aggregate, daily) + yhosts + EasyList China (|| rules)
-#          + StevenBlack base (foreign baseline — trim in tools/update_cn_blocklist.sh).
-# Note: GitHub runners are outside CN so all sources download fine here; mainland
-# devices may not be able to fetch this release URL directly — push over LAN instead
-# (tools/update_cn_blocklist.sh <device-ip>) or mirror the asset domestically.
+# 每周自动重建中国区规则：
+#   1) 下载规则源（海外 runner 直连 GitHub 源，无需镜像）
+#   2) 构建哈希库（与本地 tools/update_cn_blocklist.sh 完全一致）
+#   3) 用 API 推送到 Gitee 的 dist 分支（设备从这里自动拉取）—— 需要 repo secret:
+#      GITEE_PUSH_TOKEN = Gitee 私人令牌（projects 权限）
+#      设置一次: gh secret set GITEE_PUSH_TOKEN --repo <你的GH用户名>/esp32-c3-adblock-cn
+#   4) 同一份 bin 也发布到 GitHub release 作为海外备份
 on:
   schedule:
-    - cron: "23 5 * * 1"   # Mondays 05:23 UTC
+    - cron: "23 5 * * 1"   # Mondays 05:23 UTC = 北京时间周一 13:23
   workflow_dispatch:
 
 permissions:
@@ -30,17 +30,28 @@ jobs:
           size=$(stat -c%s data/blocklist.bin)
           echo "size=$size bytes"
           test $((size % 5)) -eq 0                  # whole 40-bit entries
-          test "$size" -gt 600000                   # >120k entries (anti-AD ~111k + supplements)
+          test "$size" -gt 600000                   # >120k entries
           test "$size" -le 1100000                  # fits the 0x120000 LittleFS partition
-      - name: Publish to the 'blocklist-cn' release
+      - name: Push to Gitee dist branch (device auto-update source)
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_PUSH_TOKEN }}
+        run: python3 tools/publish_gitee_api.py
+      - name: End-to-end check (anonymous fetch, exactly what the device does)
+        run: |
+          python3 - <<'EOF'
+          import urllib.request
+          url = 'https://gitee.com/hewmbj/esp32-c3-adblock-cn/raw/dist/blocklist.bin'
+          remote = urllib.request.urlopen(url, timeout=120).read()
+          local = open('data/blocklist.bin', 'rb').read()
+          assert remote == local and len(remote) % 5 == 0, 'raw fetch mismatch'
+          print(f'端到端校验通过: {len(remote)} 字节 / {len(remote)//5} 条')
+          EOF
+      - name: Publish to GitHub release (overseas backup)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           entries=$(( $(stat -c%s data/blocklist.bin) / 5 ))
-          notes="Auto-built $(date -u +%F) — ${entries} entries (anti-AD + yhosts + EasyList China + StevenBlack base).
-
-          Mainland devices: fetch this URL only if GitHub is reachable; otherwise push via LAN:
-          tools/update_cn_blocklist.sh <device-ip>"
+          notes="Auto-built $(date -u +%F) — ${entries} entries (anti-AD + yhosts + EasyList China + StevenBlack base). Pushed to Gitee dist branch."
           if gh release view blocklist-cn >/dev/null 2>&1; then
             gh release edit blocklist-cn --notes "$notes"
           else

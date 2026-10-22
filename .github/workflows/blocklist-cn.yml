@@ -35,7 +35,7 @@ jobs:
       - name: Push to Gitee dist branch (device auto-update source)
         env:
           GITEE_TOKEN: ${{ secrets.GITEE_PUSH_TOKEN }}
-        run: python3 tools/publish_gitee_api.py
+        run: tools/publish_gitee_ci.sh
       - name: End-to-end check (anonymous fetch, exactly what the device does)
         run: |
           python3 - <<'EOF'

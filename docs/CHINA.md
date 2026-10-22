@@ -46,6 +46,23 @@ GitHub 可选作镜像。
    也**不要用 GitHub release 地址**（大陆基本拉不动）。
 3. **手动上传**：dashboard → Blocklist → Upload。
 
+## CI（Gitee Go 每周定时重建）
+
+仓库已内置 `.workflow/blocklist-weekly.yml`（每周二 10:00 定时重建并推 dist 分支）。
+首次使用需在网页上做两个一次性操作：
+
+1. **开通 Gitee Go**（免费赠 200 分钟/仓库，永久有效；未开通时报「构建时长余额不足」）：
+   打开 `https://gitee.com/hewmbj/esp32-c3-adblock-cn/gitee_go` 点「开通」。
+2. **配置推送令牌**：仓库「管理」→「环境变量设置」，添加 `GITEE_TOKEN` =
+   你的 Gitee 私人令牌（需 projects 权限），供流水线把新列表推回 dist 分支。
+
+之后可手动触发验证：
+`gitee pipeline run -R hewmbj/esp32-c3-adblock-cn --ref main --file blocklist-weekly.yml`。
+不想用 CI 的话，本地 crontab 跑 `tools/publish_gitee.sh` 效果相同（全程已验证）。
+
+注：固件已把 Gitee raw 地址和 168 小时间隔烧录为默认值 —— 刷完即自动每周拉取，
+无需任何 dashboard 配置；手动设置过 Remote auto-update 的设备会覆盖默认值。
+
 ## 部署
 
 ```bash

@@ -383,7 +383,9 @@ static void beginBlocklistSwap() {
 static bool commitNewBlocklist() {                  // /blocklist.new -> live (validated)
   File f = LittleFS.open("/blocklist.new", "r");
   size_t sz = f ? f.size() : 0; if (f) f.close();
-  bool ok = sz > 0 && (sz % HASH_BYTES) == 0;       // sorted hash blob -> 5-byte multiple
+  // 0xF0000 LittleFS partition minus FS overhead; also guards against an oversized
+  // list pushed by CI (a too-big file would corrupt live blocking after swap)
+  bool ok = sz > 0 && (sz % HASH_BYTES) == 0 && sz <= 980000;
   if (ok) LittleFS.rename("/blocklist.new", BLOCKLIST_PATH);
   else    LittleFS.remove("/blocklist.new");
   reopenBlocklist();

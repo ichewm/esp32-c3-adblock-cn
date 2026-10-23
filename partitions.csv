@@ -1,11 +1,12 @@
 # Dual-OTA layout for 4MB flash: two app slots (firmware OTA) + LittleFS (blocklist).
-# 2026-10: arduino-esp32 core grew past the old 0x150000 slots (issue #48), so slots
-# are 0x160000 (1.406MB). Blocklist partition shrunk to 0x120000 (1.125MB -> 235k
-# domains @ 5 bytes) — still 2x the ~111k-entry anti-AD list, and custom/banned/
-# update.cfg files are tiny. Ends at 0x3F0000, 64KB spare at the top of flash.
+# Slots are 0x180000 (1.575MB): the REAL binary image is ~1.50MB — note PlatformIO's
+# checkprogsize under-reports vs the actual flashed image (~54KB smaller estimate),
+# which bricked the first boot with 0x160000 slots. Trust `ls -l firmware.bin`, not
+# the RAM/Flash bar. Blocklist partition 0xF0000 (983,040B -> ~186k domains @ 5B).
+# Ends exactly at 0x400000.
 # Name,     Type, SubType, Offset,   Size
 nvs,        data, nvs,     0x9000,   0x5000
 otadata,    data, ota,     0xe000,   0x2000
-app0,       app,  ota_0,   0x10000,  0x160000
-app1,       app,  ota_1,   0x170000, 0x160000
-spiffs,     data, spiffs,  0x2d0000, 0x120000
+app0,       app,  ota_0,   0x10000,  0x180000
+app1,       app,  ota_1,   0x190000, 0x180000
+spiffs,     data, spiffs,  0x310000, 0xF0000

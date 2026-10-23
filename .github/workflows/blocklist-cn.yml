@@ -31,7 +31,7 @@ jobs:
           echo "size=$size bytes"
           test $((size % 5)) -eq 0                  # whole 40-bit entries
           test "$size" -gt 600000                   # >120k entries
-          test "$size" -le 1100000                  # fits the 0x120000 LittleFS partition
+          test "$size" -le 930000                  # fits the 0xF0000 LittleFS partition
       - name: Push to Gitee dist branch (device auto-update source)
         env:
           GITEE_TOKEN: ${{ secrets.GITEE_PUSH_TOKEN }}

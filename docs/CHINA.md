@@ -21,7 +21,7 @@
 | [EasyList China](https://easylist-downloads.adblockplus.org/easylistchina.txt) | ~8k | ❌ 需代理 | 只取 `||domain^` 规则，页面元素规则 DNS 用不上 |
 | [StevenBlack](https://github.com/StevenBlack/hosts) | ~47k 净增 | ❌ 需代理 | 国外基线（走代理浏览外网时用）；**纯国内就注释掉** |
 
-合并去重后 **~161k 条 / ~807KB / 0 哈希碰撞**，分区容量约 220k 条（余量 ~35%）。
+合并去重后 **~161k 条 / ~807KB / 0 哈希碰撞**，分区容量约 186k 条。
 neohosts 已停更（404），AdGuard 中文过滤器对 DNS 无价值，均不采用。
 
 ## 托管与更新（Gitee 为主）

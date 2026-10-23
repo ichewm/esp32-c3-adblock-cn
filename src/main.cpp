@@ -513,7 +513,7 @@ static bool connectWiFi() {
   const char* pass = ss.length() ? pw.c_str() : WIFI_PASS;
   if (!ssid || !*ssid || strcmp(ssid, "YOUR_WIFI_SSID") == 0) return false;  // unconfigured
   Serial.printf("WiFi: connecting to \"%s\"%s\n", ssid, ss.length() ? " (provisioned)" : " (secrets.h)");
-  WiFi.mode(WIFI_STA); WiFi.setSleep(false); WiFi.begin(ssid, pass);
+  WiFi.mode(WIFI_STA); WiFi.setSleep(false); WiFi.setTxPower(WIFI_POWER_8_5dBm); WiFi.begin(ssid, pass);
   uint32_t t0 = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - t0 < 30000) { delay(250); Serial.print("."); }
   Serial.println();
@@ -555,9 +555,11 @@ static void startConfigPortal() {
   // arduino-esp32 3.x: scanning in STA mode then switching to WIFI_AP leaves the AP
   // interface "up" but not beaconing (verified: softAP()==true, clients see nothing).
   // WiFiManager-style fix: bring the AP up FIRST in AP_STA, scan on the STA side after.
-  WiFi.mode(WIFI_AP);            // pure AP — no STA interface at all, nothing can trigger the scan bug
+  WiFi.mode(WIFI_AP);
+  WiFi.setTxPower(WIFI_POWER_8_5dBm);   // this clone board's PA fails at the default 19.5dBm:
+                                         // softAP reports up but never beacons. 8.5dBm is proven on-air.
   bool apUp = false;
-  for (int i = 0; i < 3 && !apUp; i++) { apUp = WiFi.softAP(ap); delay(400); }
+  for (int i = 0; i < 3 && !apUp; i++) { apUp = WiFi.softAP(ap, NULL, 11); delay(400); }
   Serial.printf("[setup] softAP \"%s\": %s\n", ap, apUp ? "up" : "FAILED");
   if (!apUp) { Serial.println("[setup] radio wedged -> reboot + retry portal"); delay(500); ESP.restart(); }
   // arduino-esp32 3.x radio bug on this board: ANY WiFi.scanNetworks() call while an AP

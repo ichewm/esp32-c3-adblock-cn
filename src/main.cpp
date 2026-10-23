@@ -546,12 +546,25 @@ static void handleWifiSave() {
 }
 // Never returns — blocks in the portal loop until creds are saved (then reboots).
 static void startConfigPortal() {
-  int n = WiFi.scanNetworks();                 // scan while still in STA mode (no APSTA)
-  portalOpts = "";
-  for (int i = 0; i < n && i < 15; i++) portalOpts += "<option value='" + htmlEscape(WiFi.SSID(i)) + "'>";
-  uint8_t mac[6]; WiFi.macAddress(mac);
+  WiFi.persistent(false);
+  uint8_t mac[6]; WiFi.macAddress(mac);   // read BEFORE any mode change: after WIFI_OFF the
+                                           // driver reports 00:00:00:00:00:00 (AP became -0000)
+  WiFi.mode(WIFI_OFF);                    // clean radio state after a failed STA connect
+  delay(150);
   char ap[24]; snprintf(ap, sizeof(ap), "C3-AdBlock-%02X%02X", mac[4], mac[5]);
-  WiFi.mode(WIFI_AP); WiFi.softAP(ap);
+  // arduino-esp32 3.x: scanning in STA mode then switching to WIFI_AP leaves the AP
+  // interface "up" but not beaconing (verified: softAP()==true, clients see nothing).
+  // WiFiManager-style fix: bring the AP up FIRST in AP_STA, scan on the STA side after.
+  WiFi.mode(WIFI_AP);            // pure AP — no STA interface at all, nothing can trigger the scan bug
+  bool apUp = false;
+  for (int i = 0; i < 3 && !apUp; i++) { apUp = WiFi.softAP(ap); delay(400); }
+  Serial.printf("[setup] softAP \"%s\": %s\n", ap, apUp ? "up" : "FAILED");
+  if (!apUp) { Serial.println("[setup] radio wedged -> reboot + retry portal"); delay(500); ESP.restart(); }
+  // arduino-esp32 3.x radio bug on this board: ANY WiFi.scanNetworks() call while an AP
+  // interface exists leaves the radio channel-hopping forever — softAP() reports "up"
+  // but never beacons (verified twice via CoreWLAN air scan: 13 networks, no ours).
+  // So: no auto-scan. The portal form accepts a manually typed SSID instead.
+  portalOpts = "";
   IPAddress apIP = WiFi.softAPIP();
   dnsPortal.start(53, "*", apIP);              // catch-all -> phones pop the captive portal
   web.on("/", handlePortalRoot);

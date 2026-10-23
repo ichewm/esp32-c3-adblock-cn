@@ -38,8 +38,14 @@ MSG="blocklist $(date -u +%F) — ${ENTRIES} entries"
 # 2) 用 git plumbing 提交到孤儿分支 blocklist (只含 blocklist.bin，不碰工作区、不污染 main 历史)
 BLOB=$(git hash-object -w data/blocklist.bin)
 TREE=$(printf '100644 blob %s\tblocklist.bin\n' "$BLOB" | git mktree)
-if git show-ref --verify --quiet refs/heads/dist; then
+if git fetch -q "$REMOTE" dist 2>/dev/null && git rev-parse -q --verify FETCH_HEAD >/dev/null 2>&1; then
+  PARENT=$(git rev-parse FETCH_HEAD)  # 远端 dist 头优先（CI 可能已推过，避免 non-fast-forward）
+elif git show-ref --verify --quiet refs/heads/dist; then
   PARENT=$(git rev-parse refs/heads/dist)
+else
+  PARENT=""
+fi
+if [ -n "$PARENT" ]; then
   NEW=$(git commit-tree "$TREE" -p "$PARENT" -m "$MSG")
 else
   NEW=$(git commit-tree "$TREE" -m "$MSG")

@@ -391,27 +391,60 @@ static void handleBan() {
 }
 
 // ---------- blocklist swap (shared by upload + remote fetch) ----------
-// The partition holds one list, so we free the old one before writing the new.
-// While swapping, numHashes=0 -> device fail-opens (forwards, no blocking).
+// Non-destructive: the LIVE list is untouched until the candidate passes
+// validation (size % 5, capacity cap, sorted first<=last hash). A corrupt
+// download (we saw +158 garbage bytes over TLS on a real device) can no
+// longer leave the device blocking NOTHING — it falls back to the old list.
 static void reopenBlocklist() {
+  // Remount first: after a long streamed write + delete + rename, File handles
+  // on the same mount can end up with dead seeks (every read returns the same
+  // constant — verified via /dump). LittleFS.end()+begin() drops every cache;
+  // the bytes on flash are fine, only the read path state was stale.
+  LittleFS.end();
+  LittleFS.begin(false);
   blocklist = LittleFS.open(BLOCKLIST_PATH, "r");
   numHashes = blocklist ? blocklist.size() / HASH_BYTES : 0;
   buildFlashIndex();
 }
 static void beginBlocklistSwap() {
+  // Destructive on purpose: the 983KB partition cannot hold old+new lists side
+  // by side (2x816KB > 983KB). Safety comes from fetchBlocklist's pass-1
+  // stream validation: the old list is only deleted AFTER the new one has been
+  // proven good on the wire. The dashboard /upload path keeps commit's checks.
   if (blocklist) blocklist.close();
-  numHashes = 0;
+  numHashes = 0;                        // fail-open (forward, no blocking) while swapping
   LittleFS.remove(BLOCKLIST_PATH);
   LittleFS.remove("/blocklist.new");
 }
-static bool commitNewBlocklist() {                  // /blocklist.new -> live (validated)
+static String commitDiag = "";             // remote diagnostics via /stats.json upstat
+static bool commitNewBlocklist() {
+  commitDiag = "";
   File f = LittleFS.open("/blocklist.new", "r");
-  size_t sz = f ? f.size() : 0; if (f) f.close();
-  // 0xF0000 LittleFS partition minus FS overhead; also guards against an oversized
-  // list pushed by CI (a too-big file would corrupt live blocking after swap)
+  size_t sz = f ? f.size() : 0;
   bool ok = sz > 0 && (sz % HASH_BYTES) == 0 && sz <= 980000;
-  if (ok) LittleFS.rename("/blocklist.new", BLOCKLIST_PATH);
-  else    LittleFS.remove("/blocklist.new");
+  if (!f) commitDiag = "openfail";
+  else if (sz == 0) commitDiag = "empty";
+  else if (sz % HASH_BYTES) commitDiag = "sz%5=" + String(sz % HASH_BYTES);
+  else if (sz > 980000) commitDiag = "toobig";
+  if (ok && f) {                      // sorted sanity: first hash must be <= last
+    uint8_t first[HASH_BYTES] = {0}, last[HASH_BYTES] = {0};
+    size_t r1 = f.read(first, HASH_BYTES);
+    bool sk = f.seek(sz - HASH_BYTES);
+    size_t r2 = f.read(last, HASH_BYTES);
+    if (!sk || r1 != HASH_BYTES || r2 != HASH_BYTES) {
+      ok = false; commitDiag = "readfail r=" + String(r1) + "/" + String(r2) + " seek=" + String(sk);
+    } else {
+      uint64_t fh = unpackHash(first), lh = unpackHash(last);
+      commitDiag = "f=" + String((uint32_t)fh, HEX) + " l=" + String((uint32_t)lh, HEX);
+      if (fh > lh) { ok = false; commitDiag += " unsorted"; }
+    }
+  }
+  if (f) f.close();
+  if (ok) {
+    if (!LittleFS.rename("/blocklist.new", BLOCKLIST_PATH)) { ok = false; commitDiag += " renamefail"; }
+  } else {
+    LittleFS.remove("/blocklist.new");                   // bad candidate
+  }
   reopenBlocklist();
   return ok;
 }
@@ -464,30 +497,106 @@ static void saveUpdateCfg() {
   File f = LittleFS.open("/update.cfg", "w"); if (!f) return;
   f.println(updateUrl); f.println(updateIntervalH); f.close();
 }
+// Pass-1 validator: writeToStream() feeds bytes here; we check total % 5 and
+// hash monotonicity on the fly. Nothing touches the disk (the 983KB partition
+// cannot hold old 816KB + new 816KB side by side — a naive 'keep the old list
+// while downloading' design ENOSPCs into an empty file, verified on-device).
+struct HashValidator : public Stream {
+  uint8_t buf[HASH_BYTES]; int fill = 0;
+  size_t total = 0; uint64_t prev = 0; bool sortedOk = true;
+  uint64_t firstHash = 0, lastHash = 0;                // cross-check after commit
+  size_t write(uint8_t c) override { return write(&c, 1); }
+  size_t write(const uint8_t *data, size_t len) override {
+    total += len;
+    for (size_t i = 0; i < len; i++) {
+      buf[fill++] = data[i];
+      if (fill == HASH_BYTES) {
+        uint64_t h = unpackHash(buf);
+        if (total == HASH_BYTES) firstHash = h;
+        lastHash = h;
+        if (h < prev) sortedOk = false;
+        prev = h; fill = 0;
+      }
+    }
+    return len;
+  }
+  int available() override { return 0; }
+  int read() override { return -1; }
+  int peek() override { return -1; }
+  void flush() override {}
+  bool valid(size_t expectedMin = 600000) const {
+    return sortedOk && total >= expectedMin && (total % HASH_BYTES) == 0;
+  }
+};
+
 static bool fetchBlocklist(String url) {
   url.trim(); if (!url.length()) { updateStatus = "no url set"; return false; }
   Serial.printf("[remote] GET %s\n", url.c_str());
-  WiFiClientSecure cs; cs.setInsecure();            // blocklist isn't secret -> skip cert pinning
-  WiFiClient cl;
+
+  // ---- pass 1: stream-validate, nothing written to disk ----
+  size_t expected = 0; uint64_t expFirst = 0, expLast = 0;
+  {
+    WiFiClientSecure cs; cs.setInsecure();
+    HTTPClient http; http.setTimeout(20000);
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    if (!http.begin(cs, url)) { updateStatus = "begin failed"; return false; }
+    int code = http.GET();
+    if (code != HTTP_CODE_OK) { http.end(); updateStatus = "HTTP " + String(code); return false; }
+    HashValidator vp;
+    int got = http.writeToStream(&vp);
+    http.end();
+    if (got < 0 || !vp.valid()) {
+      updateStatus = "validate fail (" + String(vp.total) + "B" +
+                     (vp.sortedOk ? "" : ", unsorted") +
+                     (vp.total % HASH_BYTES ? ", sz%5" : "") + ")";
+      Serial.printf("[remote] %s\n", updateStatus.c_str());
+      return false;
+    }
+    expected = vp.total; expFirst = vp.firstHash; expLast = vp.lastHash;
+  }
+
+  // ---- pass 2: validated — destroy the old list, download for real ----
+  // Manual loop hard-capped at pass-1's exact byte count: the raw loop's content
+  // is proven good (it only ever over-read trailing bytes), while writeToStream()
+  // straight to a LittleFS File under a live TLS stream wrote a size-correct but
+  // content-corrupt blob (verified: identical file via LAN /upload blocks fine,
+  // the fetchBlocklist-written one forwards list hits).
+  WiFiClientSecure cs; cs.setInsecure();
   HTTPClient http; http.setTimeout(20000);
-  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);  // GitHub release -> CDN redirect
-  bool https = url.startsWith("https");
-  if (!(https ? http.begin(cs, url) : http.begin(cl, url))) { updateStatus = "begin failed"; return false; }
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  if (!http.begin(cs, url)) { updateStatus = "begin failed (pass2)"; return false; }
   int code = http.GET();
-  if (code != HTTP_CODE_OK) { http.end(); updateStatus = "HTTP " + String(code); Serial.printf("[remote] %s\n", updateStatus.c_str()); return false; }
+  if (code != HTTP_CODE_OK) { http.end(); updateStatus = "HTTP " + String(code) + " (pass2)"; return false; }
   beginBlocklistSwap();
   File f = LittleFS.open("/blocklist.new", "w");
   if (!f) { http.end(); updateStatus = "fs open failed"; reopenBlocklist(); return false; }
-  WiFiClient* stream = http.getStreamPtr();
-  int len = http.getSize(); uint8_t b[1024]; size_t total = 0; uint32_t idle = millis();
-  while (http.connected() && (len < 0 || (int)total < len)) {
-    size_t avail = stream->available();
-    if (avail) { int n = stream->readBytes(b, avail > sizeof(b) ? sizeof(b) : avail); if (n > 0) { f.write(b, n); total += n; idle = millis(); } }
-    else { if (millis() - idle > 15000) break; delay(2); }
+  {
+    WiFiClient* stream = http.getStreamPtr();
+    uint8_t b[2048]; size_t total = 0; uint32_t idle = millis();
+    while (total < expected) {
+      size_t avail = stream->available();
+      if (avail) {
+        size_t cap = sizeof(b);
+        if (expected - total < cap) cap = expected - total;
+        if (avail < cap) cap = avail;
+        int n = stream->readBytes(b, cap);
+        if (n > 0) {
+          if (f.write(b, n) != (size_t)n) break;          // flash write failed
+          total += n; idle = millis();
+        }
+      } else { if (millis() - idle > 15000) break; delay(1); }
+    }
+    f.close(); http.end();
+    if (total != expected) {
+      LittleFS.remove("/blocklist.new");
+      updateStatus = "pass2 mismatch (" + String(total) + "/" + String(expected) + ")";
+      Serial.printf("[remote] %s\n", updateStatus.c_str());
+      reopenBlocklist();
+      return false;
+    }
   }
-  f.close(); http.end();
   bool ok = commitNewBlocklist();
-  updateStatus = ok ? ("ok: " + String(numHashes) + " domains") : ("bad data (" + String(total) + "B)");
+  updateStatus = ok ? ("ok: " + String(numHashes) + " domains") : ("bad data (" + String(expected) + "B) " + commitDiag);
   Serial.printf("[remote] %s\n", updateStatus.c_str());
   return ok;
 }
@@ -622,6 +731,7 @@ void setup() {
   }
   loadCustom(); loadBanned(); loadUpdateCfg();
   Serial.printf("custom: %d, banned: %d\n", numCustom, numBanned);
+  if (numHashes) updateStatus = "loaded: " + String(numHashes) + " domains";
 
   // Hold BOOT at power-on to wipe saved WiFi and force the setup portal.
 #if CONFIG_IDF_TARGET_ESP32C3
@@ -661,7 +771,30 @@ void setup() {
     prefs.begin("wifi", false); prefs.clear(); prefs.end(); delay(500); ESP.restart(); });
   web.on("/upload", HTTP_POST, handleUploadDone, handleUpload);      // blocklist OTA (auth inside handleUpload)
   web.on("/update", HTTP_POST, handleFwUpdateDone, handleFwUpload);  // firmware OTA (auth inside handleFwUpload)
-  web.on("/fetchnow", []() { if (!requireAuth()) return; fetchBlocklist(updateUrl); web.send(200, "text/plain", updateStatus); });
+  web.on("/fetchnow", []() {
+    if (!requireAuth()) return;
+    fetchBlocklist(updateUrl);
+    bool swapWritten = updateStatus.startsWith("ok") || updateStatus.startsWith("bad data");
+    web.send(200, "text/plain", updateStatus + (swapWritten ? " — rebooting to activate" : ""));
+    if (swapWritten) { delay(400); ESP.restart(); }   // cold-boot reads of the
+    // freshly swapped file are consistently good; live reads right after the
+    // streamed write + rename return garbage on this board (clone flash).
+  });
+  // Diagnostic: dump live hashes at arbitrary offsets (field-debugging corrupt
+  // swaps — compare against a known-good local copy of the same list).
+  web.on("/dump", []() {
+    if (!requireAuth()) return;
+    long off = web.arg("off").toInt(); long cnt = web.arg("cnt").toInt();
+    if (off < 0 || cnt < 1 || cnt > 64) { web.send(400, "text/plain", "off/cnt range"); return; }
+    String s = "numHashes=" + String(numHashes) + "\n";
+    for (long i = 0; i < cnt && (uint32_t)(off + i) < numHashes; i++) {
+      blocklist.seek((uint32_t)(off + i) * HASH_BYTES);
+      uint8_t b[HASH_BYTES]; blocklist.read(b, HASH_BYTES);
+      char hex[16]; snprintf(hex, sizeof(hex), "%010llx", (unsigned long long)unpackHash(b));
+      s += String(off + i) + ": " + hex + "\n";
+    }
+    web.send(200, "text/plain", s);
+  });
   web.on("/setupdate", []() {
     if (!requireAuth()) return;
     if (web.hasArg("u")) updateUrl = web.arg("u");
@@ -683,7 +816,10 @@ void loop() {
   if (updateUrl.length()) {               // periodic remote blocklist auto-update
     uint32_t now = millis();
     if (lastCheckMs == 0) lastCheckMs = now;   // skip an immediate fetch on boot
-    else if (now - lastCheckMs >= updateIntervalH * 3600000UL) { lastCheckMs = now; fetchBlocklist(updateUrl); }
+    else if (now - lastCheckMs >= updateIntervalH * 3600000UL) {
+      lastCheckMs = now; fetchBlocklist(updateUrl);
+      if (updateStatus.startsWith("ok") || updateStatus.startsWith("bad data")) { delay(500); ESP.restart(); }
+    }
   }
   if (!busy) delay(1);   // sleep only when idle: full speed under load, cool when quiet
 }

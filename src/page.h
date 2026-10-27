@@ -28,6 +28,8 @@ h2{font-size:14px;color:#8b949e;margin:18px 0 8px}
 <button id=pausebtn onclick=togglePause()>Pause</button></div>
 <div class=cards id=sys></div>
 <h2>CLIENTS</h2><table id=ct><thead><tr><th>Client</th><th>MAC</th><th>Blocked</th><th>Allowed</th><th></th></tr></thead><tbody></tbody></table>
+<h2>QUERY LOG <label style="font:12px system-ui;font-weight:400;color:#8b949e"><input type=checkbox id=onlyb onchange=load()> only blocked</label></h2>
+<table id=ql><thead><tr><th>Domain</th><th>Client</th><th>Result</th><th>Age</th></tr></thead><tbody></tbody></table>
 <h2>CUSTOM BLOCKED DOMAINS</h2>
 <div style=margin-bottom:8px><input id=dom placeholder="ads.example.com" size=30><button onclick=addDom()>Block domain</button></div>
 <table id=cl><tbody></tbody></table>
@@ -66,6 +68,8 @@ ct.tBodies[0].innerHTML=s.clients.sort((a,b)=>(b.blocked+b.allowed)-(a.blocked+a
 `<tr><td>${c.ip}${c.banned?' <span class=tag style=color:#f85149>BANNED</span>':''}</td><td>${c.mac}</td>
 <td class=b>${fmt(c.blocked)}</td><td class=a>${fmt(c.allowed)}</td>
 <td><button class=ban data-ip="${c.ip}">${c.banned?'Unban':'Ban'}</button></td></tr>`).join('');
+ql.tBodies[0].innerHTML=(onlyb.checked?s.log.filter(e=>e.b):s.log).slice(0,40).map(e=>
+`<tr><td>${esc(e.d)}</td><td>${e.ip}</td><td class=${e.b?'b':'a'}>${e.b?'BLOCKED':'allowed'}</td><td style=color:#8b949e>${e.age}s ago</td></tr>`).join('')||'<tr><td style=color:#8b949e>no queries yet</td></tr>';
 cl.tBodies[0].innerHTML=s.custom.map(d=>`<tr><td>${esc(d)}</td><td style=text-align:right><button class=rmbtn data-d="${esc(d)}">remove</button></td></tr>`).join('')||'<tr><td style=color:#8b949e>none yet</td></tr>';
 if(document.activeElement!=uurl)uurl.value=s.upurl||'';
 if(document.activeElement!=uiv)uiv.value=s.upiv||24;

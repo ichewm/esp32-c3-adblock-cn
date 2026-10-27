@@ -55,6 +55,21 @@ struct Dev { uint32_t ip; uint8_t mac[6]; uint32_t blocked, allowed, lastSeen; b
 static const int MAX_CLIENTS = 96;
 Dev clients[MAX_CLIENTS]; int numClients = 0;
 
+// Query log ring — last 128 queries (domain + client + verdict) for the dashboard.
+// Upstream only keeps counters; PR #33 (query logging) was never merged, so we
+// carry a minimal in-RAM ring: no flash wear, lost on reboot (fine for a live view).
+static const int QLOG = 128;
+struct QEntry { uint32_t ip; uint32_t t; bool blocked; char d[72]; };
+static QEntry qlog[QLOG];
+static int qlogHead = 0, qlogCount = 0;
+static void qlogAdd(uint32_t ip, const char* d, bool blocked) {
+  QEntry& e = qlog[qlogHead];
+  e.ip = ip; e.t = millis(); e.blocked = blocked;
+  strncpy(e.d, d, sizeof(e.d) - 1); e.d[sizeof(e.d) - 1] = 0;
+  qlogHead = (qlogHead + 1) % QLOG;
+  if (qlogCount < QLOG) qlogCount++;
+}
+
 static const int MAX_CUSTOM = 200;
 String customDom[MAX_CUSTOM]; uint64_t customHash[MAX_CUSTOM]; int numCustom = 0;
 
@@ -287,6 +302,7 @@ static bool handleDns() {
     Dev* c = getClient((uint32_t)cip);
     bool ban = c && c->banned;
     bool blocked = ban || (blockingOn && dl && numHashes && isBlocked(domain));
+    if (dl) qlogAdd((uint32_t)cip, domain, blocked);
     int rlen;
     if (blocked) { rlen = buildBlocked(qend, qtype); totalBlocked++; if (c) c->blocked++; }
     else         { rlen = forwardUpstream(qlen, qend);     totalAllowed++; if (c) c->allowed++; }
@@ -336,6 +352,14 @@ static void handleStats() {
     j += (i ? "," : ""); j += "{\"ip\":\"" + ip.toString() + "\",\"mac\":\"" + macStr(c.mac) + "\",\"blocked\":" + c.blocked + ",\"allowed\":" + c.allowed + ",\"banned\":" + (c.banned?"true":"false") + "}"; }
   j += "],\"custom\":[";
   for (int i = 0; i < numCustom; i++) { j += (i ? "," : ""); j += "\"" + jesc(customDom[i]) + "\""; }
+  j += "],\"log\":[";
+  for (int k = 0; k < qlogCount && k < 60; k++) {          // newest first, capped for JSON size
+    QEntry& e = qlog[(qlogHead - 1 - k + 2 * QLOG) % QLOG];
+    IPAddress eip(e.ip);
+    j += (k ? "," : "");
+    j += "{\"d\":\"" + jesc(e.d) + "\",\"ip\":\"" + eip.toString() + "\",\"b\":" + (e.blocked ? "true" : "false") +
+         ",\"age\":" + (uint32_t)((millis() - e.t) / 1000) + "}";
+  }
   j += "]}";
   web.send(200, "application/json", j);
 }

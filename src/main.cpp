@@ -15,7 +15,9 @@
 #include <ArduinoOTA.h>        // network firmware flashing (pio run over wifi)
 #include <DNSServer.h>         // captive-portal catch-all DNS
 #include <Preferences.h>       // NVS store for provisioned WiFi creds
+#include <time.h>              // NTP clock for the fixed weekly update window
 #include "lwip/etharp.h"
+#include "lwip/dns.h"
 #include "lwip/netif.h"
 #include "secrets.h"   // WIFI_SSID / WIFI_PASS — used only as a FALLBACK if no creds
                        // have been provisioned via the captive portal (copy secrets.example.h)
@@ -83,6 +85,12 @@ uint32_t bannedIP[MAX_BAN]; int numBanned = 0;
 String updateUrl = "https://gitee.com/hewmbj/esp32-c3-adblock-cn/raw/dist/blocklist.bin";
 uint32_t updateIntervalH = 168;      // hours between auto-fetches (weekly)
 uint32_t lastCheckMs = 0;
+// Fixed weekly window (NTP): Monday >= 10:00 local. Chain rhythm:
+//   Mon 06:00 GitHub Actions builds -> ~06:02 Gitee dist -> 10:00 device pulls.
+// 168h millis interval stays as the fallback when NTP never syncs.
+static uint32_t lastWeeklyFetchDay = 0;   // epoch-day guard, NVS-persisted
+static uint32_t lastWeeklyTryMs = 0;      // failed-attempt cooldown (30 min)
+static bool ntpSynced() { time_t t = time(nullptr); struct tm tmv; localtime_r(&t, &tmv); return tmv.tm_year + 1900 >= 2021; }
 String updateStatus = "never";
 
 // WiFi provisioning (captive portal)
@@ -752,6 +760,12 @@ void setup() {
 
   if (!connectWiFi()) startConfigPortal();   // portal blocks + reboots on save; returns only when connected
   Serial.printf("WiFi up: %s\n", WiFi.localIP().toString().c_str());
+  { // our own resolver -> AliDNS directly: skip the router's DNS loop
+    // (the router's DNS upstream IS this box, so via-router lookups bounce back)
+    ip_addr_t d; IP_ADDR4(&d, 223, 5, 5, 5); dns_setserver(0, &d);
+  }
+  configTime(8 * 3600, 0, "ntp.aliyun.com", "ntp1.aliyun.com", "cn.pool.ntp.org");
+  { prefs.begin("upd", true); lastWeeklyFetchDay = prefs.getUInt("wk", 0); prefs.end(); }
   if (MDNS.begin("c3adblock")) { MDNS.addService("http", "tcp", 80); Serial.println("dashboard: http://c3adblock.local"); }
 
   if (strcmp(WEB_PASS, "CHANGE_ME_WEB_PASSWORD") == 0 || strcmp(OTA_PASS, "CHANGE_ME_OTA_PASSWORD") == 0)
@@ -819,12 +833,29 @@ void loop() {
   web.handleClient();
   bool busy = handleDns();
   if (!blockingOn && resumeAt && (int32_t)(millis() - resumeAt) >= 0) { blockingOn = true; resumeAt = 0; }
-  if (updateUrl.length()) {               // periodic remote blocklist auto-update
-    uint32_t now = millis();
-    if (lastCheckMs == 0) lastCheckMs = now;   // skip an immediate fetch on boot
-    else if (now - lastCheckMs >= updateIntervalH * 3600000UL) {
-      lastCheckMs = now; fetchBlocklist(updateUrl);
-      if (updateStatus.startsWith("ok") || updateStatus.startsWith("bad data")) { delay(500); ESP.restart(); }
+  if (updateUrl.length()) {
+    if (ntpSynced()) {                 // fixed window: Monday >= 10:00, retry 30min on failure
+      time_t nowt = time(nullptr);
+      struct tm tmv; localtime_r(&nowt, &tmv);
+      uint32_t eday = (uint32_t)(nowt / 86400);
+      bool stale = lastWeeklyFetchDay && eday - lastWeeklyFetchDay > 8;   // missed Mondays
+      if ((tmv.tm_wday == 1 || stale) && tmv.tm_hour >= 10 && lastWeeklyFetchDay != eday &&
+          (lastWeeklyTryMs == 0 || millis() - lastWeeklyTryMs > 1800000UL)) {
+        lastWeeklyTryMs = millis();
+        fetchBlocklist(updateUrl);
+        if (updateStatus.startsWith("ok") || updateStatus.startsWith("bad data")) {
+          lastWeeklyFetchDay = eday;
+          prefs.begin("upd", false); prefs.putUInt("wk", eday); prefs.end();
+          delay(500); ESP.restart();                        // cold-boot reads are reliable
+        }
+      }
+    } else {                           // legacy fallback: 168h millis from boot
+      uint32_t now = millis();
+      if (lastCheckMs == 0) lastCheckMs = now;
+      else if (now - lastCheckMs >= updateIntervalH * 3600000UL) {
+        lastCheckMs = now; fetchBlocklist(updateUrl);
+        if (updateStatus.startsWith("ok") || updateStatus.startsWith("bad data")) { delay(500); ESP.restart(); }
+      }
     }
   }
   if (!busy) delay(1);   // sleep only when idle: full speed under load, cool when quiet

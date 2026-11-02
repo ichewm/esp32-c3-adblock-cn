@@ -337,13 +337,19 @@ static String htmlEscape(const String& s) {
 
 #include "page.h"   // dashboard HTML (PROGMEM) — see issue #6
 
+static String clockStr() {
+  time_t t = time(nullptr); struct tm tmv; localtime_r(&t, &tmv);
+  char cb[24];
+  if (tmv.tm_year + 1900 >= 2021) { strftime(cb, sizeof(cb), "%m-%d(%a) %H:%M", &tmv); return String(cb); }
+  return String("unsynced");
+}
 static void handleStats() {
   uint32_t up = millis() / 1000;
   char ut[24]; snprintf(ut, sizeof(ut), "%lud %luh %lum", up/86400, (up%86400)/3600, (up%3600)/60);
   String j = "{\"ip\":\"" + WiFi.localIP().toString() + "\",\"blocked\":" + totalBlocked + ",\"allowed\":" + totalAllowed +
              ",\"domains\":" + numHashes + ",\"rssi\":" + WiFi.RSSI() + ",\"temp\":" + String(temperatureRead(), 1) +
              ",\"heap\":" + ESP.getFreeHeap() + ",\"uptime\":\"" + ut + "\"" +
-             ",\"upurl\":\"" + jesc(updateUrl) + "\",\"upiv\":" + updateIntervalH + ",\"upstat\":\"" + jesc(updateStatus) + "\"" +
+             ",\"upurl\":\"" + jesc(updateUrl) + "\",\"upiv\":" + updateIntervalH + ",\"upstat\":\"" + jesc(updateStatus) + "\",\"clock\":\"" + clockStr() + "\"" +
              ",\"blocking\":" + (blockingOn ? "true" : "false") +
              ",\"resumeIn\":" + (uint32_t)(!blockingOn && resumeAt ? (resumeAt - millis()) / 1000 : 0) +
              ",\"defcreds\":" + ((strcmp(WEB_PASS, "CHANGE_ME_WEB_PASSWORD") == 0 || strcmp(OTA_PASS, "CHANGE_ME_OTA_PASSWORD") == 0) ? "true" : "false") +

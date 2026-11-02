@@ -9,7 +9,7 @@ name: blocklist-cn
 #   4) 同一份 bin 也发布到 GitHub release 作为海外备份
 on:
   schedule:
-    - cron: "23 5 * * 1"   # Mondays 05:23 UTC = 北京时间周一 13:23
+    - cron: "0 22 * * 0"   # Sun 22:00 UTC = 北京时间周一 06:00
   workflow_dispatch:
 
 permissions:

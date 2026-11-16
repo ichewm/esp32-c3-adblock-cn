@@ -49,8 +49,10 @@ GitHub 可选作镜像。
 ## CI（GitHub Actions 每周定时重建 → 推 Gitee）
 
 构建平面在 GitHub（免费、Secrets 机制可靠），分发平面在 Gitee（设备拉取快）。
-已配置：`.github/workflows/blocklist-cn.yml`，每周一 13:23（北京时间）自动
-下载规则源 → 构建 → 推送 Gitee dist 分支 → 发 GitHub release 备份。
+已配置：`.github/workflows/blocklist-cn.yml`，每周一 06:00（北京时间；GitHub
+调度队列带延迟，实测晚 3.5 小时左右）自动下载规则源 → 构建 → 推送 Gitee dist
+分支 → 发 GitHub release 备份；设备在每周一 12:00（本地 NTP 时钟）拉取，
+给构建链留 6 小时余量。
 
 唯一前置条件（一次性）：在 GitHub 仓库 Settings → Secrets → Actions 添加
 `GITEE_PUSH_TOKEN` = Gitee 私人令牌（projects 权限）。

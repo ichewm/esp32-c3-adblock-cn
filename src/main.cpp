@@ -85,8 +85,9 @@ uint32_t bannedIP[MAX_BAN]; int numBanned = 0;
 String updateUrl = "https://gitee.com/hewmbj/esp32-c3-adblock-cn/raw/dist/blocklist.bin";
 uint32_t updateIntervalH = 168;      // hours between auto-fetches (weekly)
 uint32_t lastCheckMs = 0;
-// Fixed weekly window (NTP): Monday >= 10:00 local. Chain rhythm:
-//   Mon 06:00 GitHub Actions builds -> ~06:02 Gitee dist -> 10:00 device pulls.
+// Fixed weekly window (NTP): Monday >= 12:00 local. Chain rhythm:
+//   Mon 06:00 GitHub Actions builds (cron; GH's queue delays runs by hours —
+//   observed ~3.5h) -> Gitee dist -> 12:00 device pulls (6h slack for delays).
 // 168h millis interval stays as the fallback when NTP never syncs.
 static uint32_t lastWeeklyFetchDay = 0;   // epoch-day guard, NVS-persisted
 static uint32_t lastWeeklyTryMs = 0;      // failed-attempt cooldown (30 min)
@@ -834,12 +835,12 @@ void loop() {
   bool busy = handleDns();
   if (!blockingOn && resumeAt && (int32_t)(millis() - resumeAt) >= 0) { blockingOn = true; resumeAt = 0; }
   if (updateUrl.length()) {
-    if (ntpSynced()) {                 // fixed window: Monday >= 10:00, retry 30min on failure
+    if (ntpSynced()) {                 // fixed window: Monday >= 12:00, retry 30min on failure
       time_t nowt = time(nullptr);
       struct tm tmv; localtime_r(&nowt, &tmv);
       uint32_t eday = (uint32_t)(nowt / 86400);
       bool stale = lastWeeklyFetchDay && eday - lastWeeklyFetchDay > 8;   // missed Mondays
-      if ((tmv.tm_wday == 1 || stale) && tmv.tm_hour >= 10 && lastWeeklyFetchDay != eday &&
+      if ((tmv.tm_wday == 1 || stale) && tmv.tm_hour >= 12 && lastWeeklyFetchDay != eday &&
           (lastWeeklyTryMs == 0 || millis() - lastWeeklyTryMs > 1800000UL)) {
         lastWeeklyTryMs = millis();
         fetchBlocklist(updateUrl);

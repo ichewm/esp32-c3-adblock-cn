@@ -32,11 +32,16 @@
 #define UPSTREAM_PORT 53
 #endif
 // RFC 8484 DoH endpoint (encrypted forwarding — immune to off-path UDP poisoning).
-// IP form on purpose: a hostname URL would need a DNS lookup and WE are this network's
-// resolver (bootstrap recursion). AliDNS's cert carries an IP SAN for 223.5.5.5, so
-// full chain validation against the embedded root (doh_ca.h) still works.
+// Hostname form on purpose, twice over:
+//  1. mbedtls 2.28 (arduino-esp32 2.0.x) does not match an IP-form hostname against
+//     the cert's IP SANs — "https://223.5.5.5/dns-query" fails CN validation against
+//     the *.alidns.com cert and every DoH attempt dies in the TLS handshake (-1).
+//  2. resolving dns.alidns.com goes through the SYSTEM resolver, which setup()
+//     points at AliDNS directly — NOT through this device's own :53 server, so
+//     there is no bootstrap recursion. Full chain validation against the embedded
+//     GlobalSign R5 root (doh_ca.h) still applies.
 #ifndef UPSTREAM_DOH_URL
-#define UPSTREAM_DOH_URL "https://223.5.5.5/dns-query"
+#define UPSTREAM_DOH_URL "https://dns.alidns.com/dns-query"
 #endif
 static const char* FW_VER = "cn-2.2.0";   // shown in /stats.json (fw) — bump on changes
 static const IPAddress UPSTREAM(UPSTREAM_IP);
@@ -344,7 +349,6 @@ static int buildBlocked(int qend, uint16_t qtype) {
 static int forwardUdp(int qlen, int qend) {
   upstreamCli.flush();                                   // release any half-read buffer
   while (upstreamCli.parsePacket() > 0) upstreamCli.flush();   // drop stale late replies
-  const uint8_t cid0 = buf[0], cid1 = buf[1];
   const uint16_t wid = (uint16_t)esp_random();
   uint8_t q[260]; int ql = qend - 12;
   const bool haveQ = ql > 0 && ql <= (int)sizeof(q) && qend <= qlen;
@@ -361,7 +365,6 @@ static int forwardUdp(int qlen, int qend) {
     if (!fromUp || n < 12 || sz > (int)sizeof(buf)) continue;
     if (buf[0] != (wid >> 8) || buf[1] != (wid & 0xFF)) continue;
     if (haveQ && (n < 12 + ql || memcmp(buf + 12, q, ql) != 0)) continue;
-    buf[0] = cid0; buf[1] = cid1;
     return n;
   }
   return 0;
@@ -377,14 +380,16 @@ static HTTPClient dohHttp;
 static bool dohInited = false;
 static uint32_t dohFailStreak = 0, dohDownUntil = 0, dohOkCount = 0, dohUdpCount = 0;
 static String dohStatus = "init";
-static void dohFail(const char* why) {
+static void dohFail(const char* why, int httpCode = 0) {
   dohFailStreak++;
+  String w = String(why);
+  if (httpCode) w += "(" + String(httpCode) + ")";   // HTTP status, or negative HTTPClient error
   dohHttp.end(); dohTls.stop(); dohInited = false;
   if (dohFailStreak >= 3) {
     dohDownUntil = millis() + 120000UL;
-    dohStatus = String("down: ") + why + " (UDP fallback, retries in 2min)";
+    dohStatus = String("down: ") + w + " (UDP fallback, retries in 2min)";
   } else {
-    dohStatus = String("retrying: ") + why;
+    dohStatus = String("retrying: ") + w;
   }
 }
 static bool dohEnsure() {          // (re)bind the client; the TLS handshake happens on first POST
@@ -392,7 +397,7 @@ static bool dohEnsure() {          // (re)bind the client; the TLS handshake hap
   if (millis() < dohDownUntil) return false;
   dohTls.setCACert(DOH_ROOT_CA);   // full chain validation: GlobalSign R5 -> *.alidns.com (IP SAN)
   if (!dohHttp.begin(dohTls, UPSTREAM_DOH_URL)) return false;
-  dohHttp.setConnectTimeout(1500); // covers TCP connect + TLS handshake
+  dohHttp.setConnectTimeout(4000); // covers TCP + TLS handshake (first query only)
   dohHttp.setTimeout(1500);        // response once connected
   dohHttp.setReuse(true);          // keep-alive across queries
   dohHttp.addHeader("Content-Type", "application/dns-message");
@@ -400,7 +405,6 @@ static bool dohEnsure() {          // (re)bind the client; the TLS handshake hap
   return true;
 }
 static int forwardDoH(int qlen, int qend) {
-  const uint8_t cid0 = buf[0], cid1 = buf[1];
   const uint16_t wid = (uint16_t)esp_random();
   uint8_t q[260]; int ql = qend - 12;
   const bool haveQ = ql > 0 && ql <= (int)sizeof(q) && qend <= qlen;
@@ -408,7 +412,7 @@ static int forwardDoH(int qlen, int qend) {
   buf[0] = wid >> 8; buf[1] = wid & 0xFF;
   if (!dohEnsure()) return 0;
   int code = dohHttp.POST(buf, qlen);
-  if (code != HTTP_CODE_OK) { dohFail(code < 0 ? "transport" : ("http " + String(code)).c_str()); return 0; }
+  if (code != HTTP_CODE_OK) { dohFail(code < 0 ? "transport" : "http", code); return 0; }   // negative = HTTPClient error code (connect/TLS/send)
   int clen = dohHttp.getSize();
   WiFiClient* s = dohHttp.getStreamPtr();
   if (!s) { dohFail("no stream"); return 0; }
@@ -417,19 +421,21 @@ static int forwardDoH(int qlen, int qend) {
   if (n < 12) { dohFail("short reply"); return 0; }
   if (buf[0] != (wid >> 8) || buf[1] != (wid & 0xFF)) { dohFail("txid mismatch"); return 0; }
   if (haveQ && (n < 12 + ql || memcmp(buf + 12, q, ql) != 0)) { dohFail("question mismatch"); return 0; }
-  buf[0] = cid0; buf[1] = cid1;
   dohFailStreak = 0; dohOkCount++;
   if (!dohStatus.startsWith("ok")) dohStatus = "ok (DoH, TLS-validated)";
   return n;
 }
+// Both paths rewrite buf[0..1] with a fresh random txid; the CLIENT's original txid
+// is saved and restored HERE, once — the DoH path used to clobber it before falling
+// through to UDP, which then "restored" the DoH txid instead of the client's
+// (visible as dig's "ID mismatch" warning whenever DoH failed).
 static int forwardUpstream(int qlen, int qend) {
-  if (millis() >= dohDownUntil) {
-    int n = forwardDoH(qlen, qend);
-    if (n > 0) return n;
-    // fall through: any DoH failure degrades to plain UDP within the same query
-  }
-  dohUdpCount++;
-  return forwardUdp(qlen, qend);
+  const uint8_t cid0 = buf[0], cid1 = buf[1];
+  int n = 0;
+  if (millis() >= dohDownUntil) n = forwardDoH(qlen, qend);
+  if (n <= 0) { n = forwardUdp(qlen, qend); dohUdpCount++; }   // any DoH failure degrades to UDP
+  if (n > 0) { buf[0] = cid0; buf[1] = cid1; }
+  return n;
 }
 // Drain a whole RX burst per call (capped, so web/OTA still get a turn) instead of
 // one packet per loop iteration. Returns true if any query was handled this call.

@@ -14,7 +14,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 
-# 0x120000 = 1,179,648B LittleFS 分区；留余量后的安全上限（与 CI 同比例）
+# 0xF0000 = 983,040B LittleFS 分区（partitions.csv：spiffs @ 0x310000）；留余量后的安全上限（与 CI 同比例）
 MAX_BYTES=930000
 
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT

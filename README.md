@@ -8,7 +8,9 @@ A **Pi-hole-style DNS ad-blocker** that runs on a **$2 ESP32-C3** — *no PSRAM 
 
 The trick everyone misses: you don't need to keep the blocklist in RAM. Store the
 domains as **sorted 40-bit hashes in flash** and binary-search them. 140,000+ domains
-fit in ~0.7 MB of flash and are matched in ~10 ms, using **~50 KB of RAM**.
+fit in ~0.7 MB of flash and are matched in ~10 ms, using **~90 KB of RAM**
+(static: 20 KB flash-hash index + lookup cache + 128-query live log on top of the stack
+— still no PSRAM, and the hash table itself stays in flash).
 
 ```
 query in ──▶ extract domain ──▶ FNV-1a hash (+ parent suffixes)
@@ -26,7 +28,7 @@ demand PSRAM. This project stores fixed **5-byte (40-bit) hashes in flash** inst
 |---|---|---|
 | Hardware | ESP32 + PSRAM (~$8) | ESP32-C3, no PSRAM (~$2) |
 | 141k domains | ~2.5 MB of RAM | **0.67 MB of flash** |
-| RAM used | most of it | **~50 KB** |
+| RAM used | most of it | **~90 KB** (incl. 20 KB index + cache) |
 | Lookup | string compare | ~18 flash reads (~10 ms incl. WiFi RTT) |
 | Collisions | n/a | 0 at 141k (1 at 537k) |
 
@@ -122,10 +124,12 @@ just visit — see Security below.)
 The dashboard at **http://c3adblock.local** does it all:
 
 - **Blocklist** — drop a freshly built `blocklist.bin` into *Blocklist → Upload*, or set a
-  URL under *Remote auto-update* and the device pulls a prebuilt `blocklist.bin`
-  on a schedule. A fresh default list is rebuilt **every Monday** by GitHub Actions and
-  published at a stable URL, so pasting this once keeps a device current on its own:
-  `https://github.com/M-Abozaid/esp32-c3-adblock/releases/download/blocklist/blocklist.bin`
+  URL under *Remote auto-update*. This CN fork bakes in its default: a China-first list
+  rebuilt **every Monday** (GitHub Actions → Gitee dist branch) and published at
+  `https://gitee.com/hewmbj/esp32-c3-adblock-cn/raw/dist/blocklist.bin` — see
+  [docs/CHINA.md](docs/CHINA.md) for the whole chain. With NTP synced the device fetches
+  in a fixed window (Monday ≥ 12:00 local time, 30-min retry on failure); the *every Nh*
+  setting only applies as the fallback while NTP has never synced.
 - **Firmware** — upload `.pio/build/c3/firmware.bin` under *Firmware → OTA update*; the
   device verifies it and reboots into the new image. Or push over WiFi from the CLI:
   ```bash
@@ -142,9 +146,9 @@ The dashboard's read-only view (`/`, `/stats.json`) stays open, but every
 state-changing endpoint requires **HTTP Basic Auth** (`WEB_USER`/`WEB_PASS` from
 `secrets.h`):
 
-- `/ban`, `/addblock`, `/unblock`, `/forgetwifi`
+- `/ban`, `/addblock`, `/unblock`, `/pause`, `/resume`, `/forgetwifi`
 - `/upload`, `/update` (blocklist and firmware OTA)
-- `/setupdate`, `/fetchnow`
+- `/setupdate`, `/fetchnow`, `/dump`
 
 Network OTA (`ArduinoOTA`, e.g. `pio run -t upload --upload-port c3adblock.local
 --upload-protocol espota`) requires `OTA_PASS` from the same file.
@@ -174,6 +178,13 @@ now also requires a custom `X-Requested-With: c3-adblock` header, which a plain
 `<img>`/auto-submitted `<form>` CSRF can't attach (only same-origin `fetch()`
 can, which is what the dashboard's own JS does) — this is why `/forgetwifi` is
 no longer a bare URL you can visit directly; use the dashboard button instead.
+
+**Remote blocklist fetch is TLS-encrypted but not certificate-validated**
+(`setInsecure()`): a passive observer can't tamper with the download, but an active
+on-path attacker (rogue AP, ARP-spoofed gateway) could serve a substitute blocklist
+and thereby steer which domains get blocked or allowed on your network. Firmware
+reflashing is *not* reachable through this path. Certificate pinning would close it,
+but breaks whenever the hosting rotates certs — accepted tradeoff for a filter list.
 
 **Default credentials:** if `secrets.h` still has the placeholder
 `CHANGE_ME_WEB_PASSWORD` / `CHANGE_ME_OTA_PASSWORD` values from

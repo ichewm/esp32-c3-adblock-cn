@@ -82,7 +82,8 @@ uint32_t bannedIP[MAX_BAN]; int numBanned = 0;
 // CN fork: defaults are baked in at flash time — a freshly flashed device pulls the
 // Gitee-hosted China list weekly with zero dashboard config. /update.cfg (written
 // by /setupdate) still overrides these when present.
-String updateUrl = "https://gitee.com/hewmbj/esp32-c3-adblock-cn/raw/dist/blocklist.bin";
+static const char* DEFAULT_UPDATE_URL = "https://gitee.com/hewmbj/esp32-c3-adblock-cn/raw/dist/blocklist.bin";
+String updateUrl = DEFAULT_UPDATE_URL;
 uint32_t updateIntervalH = 168;      // hours between auto-fetches (weekly)
 uint32_t lastCheckMs = 0;
 // Fixed weekly window (NTP): Monday >= 12:00 local. Chain rhythm:
@@ -209,7 +210,9 @@ static void loadCustom() {
 static void saveCustom() { File f = LittleFS.open("/custom.txt", "w"); if (!f) return; for (int i = 0; i < numCustom; i++) f.println(customDom[i]); f.close(); }
 static bool addCustom(String d) {
   d.trim(); d.toLowerCase(); if (d.startsWith("www.")) d = d.substring(4);
-  if (!d.length() || d.indexOf('.') < 0 || numCustom >= MAX_CUSTOM) return false;
+  // 253 = RFC 1035 max domain length: a URL arg can carry multi-KB strings that would
+  // bloat custom.txt and every subsequent /stats.json render (escaped, but huge).
+  if (!d.length() || d.indexOf('.') < 0 || d.length() > 253 || numCustom >= MAX_CUSTOM) return false;
   for (int i = 0; i < numCustom; i++) if (customDom[i] == d) return false;
   customDom[numCustom] = d; customHash[numCustom] = fnv40(d.c_str(), d.length()); numCustom++; saveCustom(); return true;
 }
@@ -469,7 +472,11 @@ static bool upOk = false;
 static bool upAuthOk = false;
 static File upFile;
 static void handleUploadDone() {
-  if (!upAuthOk) { web.requestAuthentication(); return; }
+  // Independent re-check, not the upAuthOk flag: that flag is only set by the upload
+  // callback, which never fires for a POST without a multipart file part — a stale
+  // true left over from an earlier request would answer "ok" unauthenticated.
+  if (web.header(CSRF_HEADER) != CSRF_VALUE) { web.send(403, "text/plain", "missing CSRF header"); return; }
+  if (!web.authenticate(WEB_USER, WEB_PASS)) { web.requestAuthentication(); return; }
   web.send(upOk ? 200 : 500, "text/plain",
            upOk ? "ok" : "rejected: empty or size not a multiple of 5 (not a blocklist.bin?)");
 }
@@ -560,7 +567,12 @@ static bool fetchBlocklist(String url) {
     HashValidator vp;
     int got = http.writeToStream(&vp);
     http.end();
-    if (got < 0 || !vp.valid()) {
+    // Size floor only for the baked-in CN default list (catches a truncated/garbage
+    // dist push — the CN list is ~800KB, so anything far smaller means the publish
+    // went wrong). Custom /setupdate URLs may legitimately be small personal lists;
+    // a blanket 600KB floor made every custom-list fetch fail "validate fail".
+    const size_t minBytes = (url == DEFAULT_UPDATE_URL) ? 600000 : HASH_BYTES;
+    if (got < 0 || !vp.valid(minBytes)) {
       updateStatus = "validate fail (" + String(vp.total) + "B" +
                      (vp.sortedOk ? "" : ", unsorted") +
                      (vp.total % HASH_BYTES ? ", sz%5" : "") + ")";
@@ -619,7 +631,10 @@ static bool fetchBlocklist(String url) {
 // ---------- firmware OTA (browser upload of firmware.bin -> reboot) ----------
 static bool fwAuthOk = false;
 static void handleFwUpdateDone() {
-  if (!fwAuthOk) { web.requestAuthentication(); return; }
+  // Independent re-check (same rationale as handleUploadDone): a stale fwAuthOk must
+  // never be able to reach the ESP.restart() path on a bodyless POST.
+  if (web.header(CSRF_HEADER) != CSRF_VALUE) { web.send(403, "text/plain", "missing CSRF header"); return; }
+  if (!web.authenticate(WEB_USER, WEB_PASS)) { web.requestAuthentication(); return; }
   bool ok = !Update.hasError();
   web.send(ok ? 200 : 500, "text/plain", ok ? "ok, rebooting" : "firmware update failed");
   if (ok) { delay(300); ESP.restart(); }

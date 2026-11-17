@@ -146,7 +146,7 @@ The dashboard's read-only view (`/`, `/stats.json`) stays open, but every
 state-changing endpoint requires **HTTP Basic Auth** (`WEB_USER`/`WEB_PASS` from
 `secrets.h`):
 
-- `/ban`, `/addblock`, `/unblock`, `/pause`, `/resume`, `/forgetwifi`
+- `/ban`, `/addblock`, `/unblock`, `/addallow`, `/delallow`, `/pause`, `/resume`, `/forgetwifi`
 - `/upload`, `/update` (blocklist and firmware OTA)
 - `/setupdate`, `/fetchnow`, `/dump`
 
@@ -229,6 +229,12 @@ dig @<c3-ip> github.com        # -> real IP  (forwarded)
 - ✅ mDNS (`c3adblock.local`) for discovery
 - ✅ OTA — firmware + blocklist update over WiFi, plus scheduled remote blocklist pulls
 - ✅ Captive-portal WiFi setup (no hardcoded creds) + one-click browser web-installer
+- ✅ Encrypted upstream — DoH (RFC 8484, TLS cert-validated against the embedded
+  GlobalSign R5 root) with automatic plain-UDP fallback: forwarded queries can't be
+  poisoned off-path the way plain UDP:53 can
+- ✅ Runtime allowlist — one click on a query-log entry un-blocks the matched domain
+  family (resolves the actual blocked parent, covers all its subdomains, beats every
+  block source, persisted to flash)
 - ⬜ Bucketed prefix index — ~18 flash reads/lookup → ~1–2 (issue #3), the throughput win
 - ⬜ Act as the DHCP server (hand itself out as DNS) for true plug-and-play
 

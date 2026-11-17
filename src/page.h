@@ -29,10 +29,14 @@ h2{font-size:14px;color:#8b949e;margin:18px 0 8px}
 <div class=cards id=sys></div>
 <h2>CLIENTS</h2><table id=ct><thead><tr><th>Client</th><th>MAC</th><th>Blocked</th><th>Allowed</th><th></th></tr></thead><tbody></tbody></table>
 <h2>QUERY LOG <label style="font:12px system-ui;font-weight:400;color:#8b949e"><input type=checkbox id=onlyb onchange=load()> only blocked</label></h2>
-<table id=ql><thead><tr><th>Domain</th><th>Client</th><th>Result</th><th>Age</th></tr></thead><tbody></tbody></table>
+<table id=ql><thead><tr><th>Domain</th><th>Client</th><th>Result</th><th></th><th>Age</th></tr></thead><tbody></tbody></table>
 <h2>CUSTOM BLOCKED DOMAINS</h2>
 <div style=margin-bottom:8px><input id=dom placeholder="ads.example.com" size=30><button onclick=addDom()>Block domain</button></div>
 <table id=cl><tbody></tbody></table>
+<h2>ALLOWLIST &mdash; RUNTIME OVERRIDES</h2>
+<div style=margin-bottom:8px><input id=adom placeholder="mis-blocked.example.com" size=30><button onclick=addAllowDom()>Allow domain</button></div>
+<div style="color:#8b949e;font-size:12px;margin-bottom:8px">allow beats every block source (flash list + custom) for the domain and all its subdomains &mdash; the query-log &ldquo;allow&rdquo; button resolves the blocked parent automatically</div>
+<table id=al><tbody></tbody></table>
 <h2>BLOCKLIST &mdash; UPLOAD</h2>
 <form id=upf style=margin-bottom:6px><input type=file id=blf accept=.bin><button>Upload blocklist</button> <span id=upmsg style=color:#8b949e></span></form>
 <div style="color:#8b949e;font-size:12px;margin-bottom:18px">build <code>blocklist.bin</code> with <code>tools/build_blocklist.py</code>, then upload here &mdash; no USB</div>
@@ -62,21 +66,25 @@ blockdot.textContent=on?'🛡️':'⏸️';blockbar.style.borderColor=on?'#30363
 blockstate.textContent=on?'Blocking active':(s.resumeIn>0?'Paused — resumes in '+s.resumeIn+'s':'Paused');
 pausebtn.textContent=on?'Pause':'Resume';pausedur.style.display=on?'':'none';
 sys.innerHTML=[['Total blocked',fmt(s.blocked),'b'],['Total allowed',fmt(s.allowed),'a'],['Blocklist',fmt(s.domains)+' domains',''],
-['Clients',s.clients.length,''],['WiFi',s.rssi+' dBm',''],['Temp',s.temp+' °C',''],['Free RAM',Math.round(s.heap/1024)+' KB',''],['Uptime',s.uptime,'']]
+['Clients',s.clients.length,''],['Upstream',s.doh?s.doh.split('(')[0]:'—',''],['WiFi',s.rssi+' dBm',''],['Temp',s.temp+' °C',''],['Free RAM',Math.round(s.heap/1024)+' KB',''],['Uptime',s.uptime,'']]
 .map(c=>`<div class=card><div class="v ${c[2]}">${c[1]}</div><div class=l>${c[0]}</div></div>`).join('');
 ct.tBodies[0].innerHTML=s.clients.sort((a,b)=>(b.blocked+b.allowed)-(a.blocked+a.allowed)).map(c=>
 `<tr><td>${c.ip}${c.banned?' <span class=tag style=color:#f85149>BANNED</span>':''}</td><td>${c.mac}</td>
 <td class=b>${fmt(c.blocked)}</td><td class=a>${fmt(c.allowed)}</td>
 <td><button class=ban data-ip="${c.ip}">${c.banned?'Unban':'Ban'}</button></td></tr>`).join('');
 ql.tBodies[0].innerHTML=(onlyb.checked?s.log.filter(e=>e.b):s.log).slice(0,40).map(e=>
-`<tr><td>${esc(e.d)}</td><td>${e.ip}</td><td class=${e.b?'b':'a'}>${e.b?'BLOCKED':'allowed'}</td><td style=color:#8b949e>${e.age}s ago</td></tr>`).join('')||'<tr><td style=color:#8b949e>no queries yet</td></tr>';
+`<tr><td>${esc(e.d)}</td><td>${e.ip}</td><td class=${e.b?'b':'a'}>${e.b?'BLOCKED':'allowed'}</td><td>${e.b?`<button class=alw data-d="${esc(e.d)}">allow</button>`:''}</td><td style=color:#8b949e>${e.age}s ago</td></tr>`).join('')||'<tr><td style=color:#8b949e>no queries yet</td></tr>';
 cl.tBodies[0].innerHTML=s.custom.map(d=>`<tr><td>${esc(d)}</td><td style=text-align:right><button class=rmbtn data-d="${esc(d)}">remove</button></td></tr>`).join('')||'<tr><td style=color:#8b949e>none yet</td></tr>';
+al.tBodies[0].innerHTML=s.allow.map(d=>`<tr><td>${esc(d)}</td><td style=text-align:right><button class=rmabtn data-d="${esc(d)}">remove</button></td></tr>`).join('')||'<tr><td style=color:#8b949e>none — an allow entry beats every block, subdomains included</td></tr>';
 if(document.activeElement!=uurl)uurl.value=s.upurl||'';
 if(document.activeElement!=uiv)uiv.value=s.upiv||24;
 ustat.textContent=s.upstat||'—';}
 function addDom(){let d=dom.value.trim();if(d){fetch('/addblock?d='+encodeURIComponent(d),{headers:CSRF_HDRS}).then(()=>{dom.value='';load()})}}
+function addAllowDom(){let d=adom.value.trim();if(d){fetch('/addallow?d='+encodeURIComponent(d),{headers:CSRF_HDRS}).then(()=>{adom.value='';load()})}}
 ct.addEventListener('click',e=>{if(e.target.classList.contains('ban'))fetch('/ban?ip='+e.target.dataset.ip,{headers:CSRF_HDRS}).then(load)});
 cl.addEventListener('click',e=>{if(e.target.classList.contains('rmbtn'))fetch('/unblock?d='+encodeURIComponent(e.target.dataset.d),{headers:CSRF_HDRS}).then(load)});
+al.addEventListener('click',e=>{if(e.target.classList.contains('rmabtn'))fetch('/delallow?d='+encodeURIComponent(e.target.dataset.d),{headers:CSRF_HDRS}).then(load)});
+ql.addEventListener('click',e=>{if(e.target.classList.contains('alw'))fetch('/addallow?d='+encodeURIComponent(e.target.dataset.d),{headers:CSRF_HDRS}).then(load)});
 function saveUpd(){fetch('/setupdate?u='+encodeURIComponent(uurl.value.trim())+'&h='+(parseInt(uiv.value)||24),{headers:CSRF_HDRS}).then(load)}
 function fetchNow(){ustat.textContent='fetching...';fetch('/fetchnow',{headers:CSRF_HDRS}).then(r=>r.text()).then(t=>{ustat.textContent=t;load()})}
 function forgetWifi(){fetch('/forgetwifi',{headers:CSRF_HDRS}).then(r=>r.text()).then(t=>alert(t))}

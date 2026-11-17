@@ -9,6 +9,7 @@
 |---|---|---|
 | `partitions.csv` | 固件槽 0x150000→0x180000，规则分区 0x150000→0xF0000（@0x310000） | 上游在新版 arduino-esp32 下编译超分区（issue #48）；0x160000 槽仍装不下实际 ~1.5MB 镜像，最终 0x180000 槽 + 锁 espressif32@6.9.0（详见 partitions.csv 头注释） |
 | `src/main.cpp` | 上游 DNS: Quad9 `9.9.9.9` → 阿里 `223.5.5.5` | Quad9 在国内延迟高且易被污染；想换 DNSPod 改回 `119,29,29,29` |
+| `src/main.cpp` | 转发上游: 明文 UDP → **DoH 加密**（RFC 8484，GlobalSign R5 根证书校验，失败自动降级 UDP） | 明文 UDP:53 的应答可被链路注入污染 |
 | `tools/update_cn_blocklist.sh` | 新增：中国优先规则一键构建/推送 | 上游默认列表偏欧美 |
 | `.github/workflows/blocklist-cn.yml` | 新增：每周一自动重建中国区列表并发布 release | 规则保鲜 |
 
@@ -96,5 +97,6 @@ pio run -e c3 -t upload && pio run -e c3 -t uploadfs
   —— DNS 层无解（Pi-hole 同样无解），需端上方案（如 AdGuard 本地 VPN 模式）叠加。
 - **HTTPDNS 绕过**：淘宝/抖音等部分请求走内置 HTTPDNS，不经过本设备。
 - **误杀排查**：某 APP 打不开时先在 dashboard 看 allowed/blocked 计数，用 `/pause` 暂停
-  全局拦截做对照；确认误杀的域名在上游列表里，本分支暂无运行时白名单（规划中）。
+  全局拦截做对照；确认误杀后点查询记录里的 **allow** 按钮一键放行（运行时白名单：自动定位到
+  实际被拦的父域、覆盖其全部子域、优先级高于一切拦截源、flash 持久化）。
 - 设备是全网 DNS 单点：路由器侧建议保留一个备用 DNS（如 223.5.5.5），设备挂了只退化为不拦截。

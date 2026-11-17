@@ -21,6 +21,7 @@
 #include "lwip/netif.h"
 #include "secrets.h"   // WIFI_SSID / WIFI_PASS — used only as a FALLBACK if no creds
                        // have been provisioned via the captive portal (copy secrets.example.h)
+#include "doh_ca.h"    // GlobalSign ECC R5 root — validates the DoH upstream's TLS cert
 
 // ---- config ----
 #ifndef UPSTREAM_IP
@@ -30,6 +31,14 @@
 #ifndef UPSTREAM_PORT
 #define UPSTREAM_PORT 53
 #endif
+// RFC 8484 DoH endpoint (encrypted forwarding — immune to off-path UDP poisoning).
+// IP form on purpose: a hostname URL would need a DNS lookup and WE are this network's
+// resolver (bootstrap recursion). AliDNS's cert carries an IP SAN for 223.5.5.5, so
+// full chain validation against the embedded root (doh_ca.h) still works.
+#ifndef UPSTREAM_DOH_URL
+#define UPSTREAM_DOH_URL "https://223.5.5.5/dns-query"
+#endif
+static const char* FW_VER = "cn-2.2.0";   // shown in /stats.json (fw) — bump on changes
 static const IPAddress UPSTREAM(UPSTREAM_IP);
 static const uint16_t DNS_PORT = 53;
 static const char* BLOCKLIST_PATH = "/blocklist.bin";
@@ -74,6 +83,11 @@ static void qlogAdd(uint32_t ip, const char* d, bool blocked) {
 
 static const int MAX_CUSTOM = 200;
 String customDom[MAX_CUSTOM]; uint64_t customHash[MAX_CUSTOM]; int numCustom = 0;
+
+// runtime allowlist: string-matched (no hash collisions), beats EVERY block source
+// (flash list + custom blocks) for its domain and all subdomains
+static const int MAX_ALLOW = 200;
+String allowDom[MAX_ALLOW]; int numAllow = 0; uint32_t allowHits = 0;
 
 static const int MAX_BAN = 32;
 uint32_t bannedIP[MAX_BAN]; int numBanned = 0;
@@ -223,6 +237,57 @@ static void removeCustom(String d) {
     numCustom--; saveCustom(); return;
   }
 }
+
+// ---------- runtime allowlist ----------
+// The "family member says an app broke" escape hatch: an allow entry beats every
+// block source (flash list AND custom blocks) for its domain + all subdomains.
+// Matched by STRING (not hash) — no collision risk on an allow decision.
+static void loadAllow() {
+  numAllow = 0; File f = LittleFS.open("/allow.txt", "r"); if (!f) return;
+  while (f.available() && numAllow < MAX_ALLOW) {
+    String l = f.readStringUntil('\n'); l.trim(); l.toLowerCase();
+    if (l.length() && l.indexOf('.') > 0) allowDom[numAllow++] = l;
+  }
+  f.close();
+}
+static void saveAllow() { File f = LittleFS.open("/allow.txt", "w"); if (!f) return; for (int i = 0; i < numAllow; i++) f.println(allowDom[i]); f.close(); }
+// Walk the domain's suffix chain (same order as isBlocked()) and return the most
+// specific suffix that is BLOCKED right now — if the block hit a parent, allowing
+// the queried subdomain would not help, so store the parent that actually matched.
+static const char* blockedSuffixOf(const String& d) {
+  const char* p = d.c_str();
+  while (p && *p) {
+    if (isBlockedHash(fnv40(p, strlen(p)))) return p;
+    const char* dot = strchr(p, '.'); if (!dot) break;
+    const char* next = dot + 1; if (!strchr(next, '.')) break; p = next;
+  }
+  return nullptr;
+}
+static bool addAllow(String d) {
+  d.trim(); d.toLowerCase(); if (d.startsWith("www.")) d = d.substring(4);
+  if (!d.length() || d.indexOf('.') < 0 || d.length() > 253 || numAllow >= MAX_ALLOW) return false;
+  const char* eff = blockedSuffixOf(d);
+  if (eff && *eff) d = eff;                 // allow the domain that actually blocked it
+  for (int i = 0; i < numAllow; i++) if (allowDom[i] == d) return false;
+  allowDom[numAllow++] = d; saveAllow(); return true;
+}
+static void removeAllow(String d) {
+  d.toLowerCase();
+  for (int i = 0; i < numAllow; i++) if (allowDom[i] == d) {
+    for (int j = i; j < numAllow - 1; j++) allowDom[j] = allowDom[j+1];
+    numAllow--; saveAllow(); return;
+  }
+}
+// is the domain itself, or any of its parent suffixes, in the allowlist?
+static bool isAllowed(const char* domain) {
+  const char* p = domain;
+  while (p && *p) {
+    for (int i = 0; i < numAllow; i++) if (allowDom[i].equals(p)) return true;
+    const char* dot = strchr(p, '.'); if (!dot) break;
+    const char* next = dot + 1; if (!strchr(next, '.')) break; p = next;
+  }
+  return false;
+}
 static bool isBannedIP(uint32_t ip) { for (int i = 0; i < numBanned; i++) if (bannedIP[i] == ip) return true; return false; }
 static void loadBanned() {
   numBanned = 0; File f = LittleFS.open("/banned.txt", "r"); if (!f) return;
@@ -273,9 +338,10 @@ static int buildBlocked(int qend, uint16_t qtype) {
 // Forward to upstream and wait for the reply that actually belongs to THIS query.
 // Issue #10: after one timeout the late reply used to sit in the socket and get relayed
 // to the next client (every answer shifted by one). Now: drain stale datagrams first,
-// send with a fresh random txid, and only accept a reply whose txid, question section,
-// and source address/port match. The client's own txid is restored on the way back.
-static int forwardUpstream(int qlen, int qend) {
+// send with a fresh random txid, and only accept a reply whose txid and question
+// section match. The client's own txid is restored on the way back.
+// This is the plain-UDP path — kept as the fallback below the DoH path.
+static int forwardUdp(int qlen, int qend) {
   upstreamCli.flush();                                   // release any half-read buffer
   while (upstreamCli.parsePacket() > 0) upstreamCli.flush();   // drop stale late replies
   const uint8_t cid0 = buf[0], cid1 = buf[1];
@@ -300,6 +366,71 @@ static int forwardUpstream(int qlen, int qend) {
   }
   return 0;
 }
+
+// ---- DoH path (RFC 8484): POST the raw query wireformat, get raw reply bytes back.
+// The DNS payload is opaque to the transport — same txid+question validation as UDP.
+// Connection is kept alive between queries (per-query cost is one RTT, not one TLS
+// handshake); on any failure we degrade to plain UDP below, and after 3 consecutive
+// failures we back off DoH entirely for 2 minutes (auto-retry after that).
+static WiFiClientSecure dohTls;
+static HTTPClient dohHttp;
+static bool dohInited = false;
+static uint32_t dohFailStreak = 0, dohDownUntil = 0, dohOkCount = 0, dohUdpCount = 0;
+static String dohStatus = "init";
+static void dohFail(const char* why) {
+  dohFailStreak++;
+  dohHttp.end(); dohTls.stop(); dohInited = false;
+  if (dohFailStreak >= 3) {
+    dohDownUntil = millis() + 120000UL;
+    dohStatus = String("down: ") + why + " (UDP fallback, retries in 2min)";
+  } else {
+    dohStatus = String("retrying: ") + why;
+  }
+}
+static bool dohEnsure() {          // (re)bind the client; the TLS handshake happens on first POST
+  if (dohInited) return true;
+  if (millis() < dohDownUntil) return false;
+  dohTls.setCACert(DOH_ROOT_CA);   // full chain validation: GlobalSign R5 -> *.alidns.com (IP SAN)
+  if (!dohHttp.begin(dohTls, UPSTREAM_DOH_URL)) return false;
+  dohHttp.setConnectTimeout(1500); // covers TCP connect + TLS handshake
+  dohHttp.setTimeout(1500);        // response once connected
+  dohHttp.setReuse(true);          // keep-alive across queries
+  dohHttp.addHeader("Content-Type", "application/dns-message");
+  dohInited = true;
+  return true;
+}
+static int forwardDoH(int qlen, int qend) {
+  const uint8_t cid0 = buf[0], cid1 = buf[1];
+  const uint16_t wid = (uint16_t)esp_random();
+  uint8_t q[260]; int ql = qend - 12;
+  const bool haveQ = ql > 0 && ql <= (int)sizeof(q) && qend <= qlen;
+  if (haveQ) memcpy(q, buf + 12, ql);
+  buf[0] = wid >> 8; buf[1] = wid & 0xFF;
+  if (!dohEnsure()) return 0;
+  int code = dohHttp.POST(buf, qlen);
+  if (code != HTTP_CODE_OK) { dohFail(code < 0 ? "transport" : ("http " + String(code)).c_str()); return 0; }
+  int clen = dohHttp.getSize();
+  WiFiClient* s = dohHttp.getStreamPtr();
+  if (!s) { dohFail("no stream"); return 0; }
+  int n = (clen > 0 && clen <= (int)sizeof(buf)) ? s->readBytes(buf, clen)
+                                                 : s->readBytes(buf, sizeof(buf));
+  if (n < 12) { dohFail("short reply"); return 0; }
+  if (buf[0] != (wid >> 8) || buf[1] != (wid & 0xFF)) { dohFail("txid mismatch"); return 0; }
+  if (haveQ && (n < 12 + ql || memcmp(buf + 12, q, ql) != 0)) { dohFail("question mismatch"); return 0; }
+  buf[0] = cid0; buf[1] = cid1;
+  dohFailStreak = 0; dohOkCount++;
+  if (!dohStatus.startsWith("ok")) dohStatus = "ok (DoH, TLS-validated)";
+  return n;
+}
+static int forwardUpstream(int qlen, int qend) {
+  if (millis() >= dohDownUntil) {
+    int n = forwardDoH(qlen, qend);
+    if (n > 0) return n;
+    // fall through: any DoH failure degrades to plain UDP within the same query
+  }
+  dohUdpCount++;
+  return forwardUdp(qlen, qend);
+}
 // Drain a whole RX burst per call (capped, so web/OTA still get a turn) instead of
 // one packet per loop iteration. Returns true if any query was handled this call.
 static bool handleDns() {
@@ -314,6 +445,7 @@ static bool handleDns() {
     Dev* c = getClient((uint32_t)cip);
     bool ban = c && c->banned;
     bool blocked = ban || (blockingOn && dl && numHashes && isBlocked(domain));
+    if (blocked && dl && isAllowed(domain)) { blocked = false; allowHits++; }   // allow beats block
     if (dl) qlogAdd((uint32_t)cip, domain, blocked);
     int rlen;
     if (blocked) { rlen = buildBlocked(qend, qtype); totalBlocked++; if (c) c->blocked++; }
@@ -370,7 +502,12 @@ static void handleStats() {
     j += (i ? "," : ""); j += "{\"ip\":\"" + ip.toString() + "\",\"mac\":\"" + macStr(c.mac) + "\",\"blocked\":" + c.blocked + ",\"allowed\":" + c.allowed + ",\"banned\":" + (c.banned?"true":"false") + "}"; }
   j += "],\"custom\":[";
   for (int i = 0; i < numCustom; i++) { j += (i ? "," : ""); j += "\"" + jesc(customDom[i]) + "\""; }
-  j += "],\"log\":[";
+  j += "],\"allow\":[";
+  for (int i = 0; i < numAllow; i++) { j += (i ? "," : ""); j += "\"" + jesc(allowDom[i]) + "\""; }
+  j += "],\"allowhits\":" + String(allowHits) +
+       ",\"fw\":\"" + String(FW_VER) + "\"" +
+       ",\"doh\":\"" + jesc(dohStatus) + "\",\"dohok\":" + String(dohOkCount) + ",\"dohudp\":" + String(dohUdpCount);
+  j += ",\"log\":[";
   for (int k = 0; k < qlogCount && k < 60; k++) {          // newest first, capped for JSON size
     QEntry& e = qlog[(qlogHead - 1 - k + 2 * QLOG) % QLOG];
     IPAddress eip(e.ip);
@@ -759,8 +896,8 @@ void setup() {
     Serial.printf("blocklist: %u domains\n", numHashes);
     buildFlashIndex();
   }
-  loadCustom(); loadBanned(); loadUpdateCfg();
-  Serial.printf("custom: %d, banned: %d\n", numCustom, numBanned);
+  loadCustom(); loadAllow(); loadBanned(); loadUpdateCfg();
+  Serial.printf("custom: %d, allow: %d, banned: %d\n", numCustom, numAllow, numBanned);
   if (numHashes) updateStatus = "loaded: " + String(numHashes) + " domains";
 
   // Hold BOOT at power-on to wipe saved WiFi and force the setup portal.
@@ -796,6 +933,8 @@ void setup() {
   web.on("/ban", handleBan);
   web.on("/addblock", []() { if (!requireAuth()) return; addCustom(web.arg("d")); web.send(200, "text/plain", "ok"); });
   web.on("/unblock", []() { if (!requireAuth()) return; removeCustom(web.arg("d")); web.send(200, "text/plain", "ok"); });
+  web.on("/addallow", []() { if (!requireAuth()) return; addAllow(web.arg("d")); web.send(200, "text/plain", "ok"); });
+  web.on("/delallow", []() { if (!requireAuth()) return; removeAllow(web.arg("d")); web.send(200, "text/plain", "ok"); });
   web.on("/pause", []() {                    // /pause?s=300  (0 or absent = indefinite)
     if (!requireAuth()) return;
     long s = web.hasArg("s") ? web.arg("s").toInt() : 0;
@@ -841,7 +980,7 @@ void setup() {
   ArduinoOTA.setHostname("c3adblock");   // pio run -t upload --upload-port c3adblock.local
   ArduinoOTA.setPassword(OTA_PASS);      // network OTA was unauthenticated upstream
   ArduinoOTA.begin();
-  Serial.println("DNS :53 + dashboard :80 + OTA up");
+  Serial.printf("DNS :53 + dashboard :80 + OTA up | fw %s | upstream DoH %s (UDP fallback)\n", FW_VER, UPSTREAM_DOH_URL);
 }
 
 void loop() {

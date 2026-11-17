@@ -7,7 +7,7 @@
 
 | 文件 | 改动 | 原因 |
 |---|---|---|
-| `partitions.csv` | 固件槽 0x150000→0x160000，规则分区 0x150000→0x120000 | 上游在新版 arduino-esp32 下编译超分区（issue #48） |
+| `partitions.csv` | 固件槽 0x150000→0x180000，规则分区 0x150000→0xF0000（@0x310000） | 上游在新版 arduino-esp32 下编译超分区（issue #48）；0x160000 槽仍装不下实际 ~1.5MB 镜像，最终 0x180000 槽 + 锁 espressif32@6.9.0（详见 partitions.csv 头注释） |
 | `src/main.cpp` | 上游 DNS: Quad9 `9.9.9.9` → 阿里 `223.5.5.5` | Quad9 在国内延迟高且易被污染；想换 DNSPod 改回 `119,29,29,29` |
 | `tools/update_cn_blocklist.sh` | 新增：中国优先规则一键构建/推送 | 上游默认列表偏欧美 |
 | `.github/workflows/blocklist-cn.yml` | 新增：每周一自动重建中国区列表并发布 release | 规则保鲜 |
@@ -65,6 +65,19 @@ GitHub 可选作镜像。
 推送令牌；且构建节点在国内百度云，拉不动 GitHub 规则源。
 注：固件已把 Gitee raw 地址和 168 小时间隔烧录为默认值 —— 刷完即自动每周拉取，
 无需任何 dashboard 配置；手动设置过 Remote auto-update 的设备会覆盖默认值。
+
+## 浏览器一键安装器（docs/）
+
+`docs/` 里的 `*.bin + manifest.json` 是 esp-web-tools 浏览器安装器的预构建物料，
+**固件或分区表一变就会过期**（历史上分区表改了三轮而物料没重建，导致安装器刷出
+旧分区表 + 无认证固件）。规则：改 `main.cpp` / `page.h` / `partitions.csv` 后重跑
+
+```bash
+tools/build_web_installer.sh      # 重建 docs/*.bin + manifest.json（偏移从 partitions.bin 解析生成）
+```
+
+并把产物随代码一起提交；CI（build.yml → web-installer job）每次 push 也会构建一份
+新鲜物料作为 artifact 供直接下载。
 
 ## 部署
 

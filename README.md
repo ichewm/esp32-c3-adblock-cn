@@ -235,7 +235,8 @@ dig @<c3-ip> github.com        # -> real IP  (forwarded)
 - ✅ Runtime allowlist — one click on a query-log entry un-blocks the matched domain
   family (resolves the actual blocked parent, covers all its subdomains, beats every
   block source, persisted to flash)
-- ⬜ Bucketed prefix index — ~18 flash reads/lookup → ~1–2 (issue #3), the throughput win
+- ⬜ Bucketed prefix index — ~18 flash reads/lookup → ~1–2 (upstream issue #3; measured
+  numbers, resource math and unfreeze criteria tracked in #1)
 - ⬜ Act as the DHCP server (hand itself out as DNS) for true plug-and-play
 
 ## Credits

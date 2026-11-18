@@ -23,6 +23,7 @@
                        // have been provisioned via the captive portal (copy secrets.example.h)
 #include "doh_ca.h"    // GlobalSign ECC R5 root — validates the DoH upstream's TLS cert
 #include "telemetry_list.h"  // evidence-verified telemetry endpoints (graveyard mode) — tools/sync_telemetry.sh
+#include "noise_corpus.h"    // popularity-ranked corpus for the profile-fog scheduler — tools/sync_noise.sh
 
 // ---- config ----
 #ifndef UPSTREAM_IP
@@ -44,7 +45,7 @@
 #ifndef UPSTREAM_DOH_URL
 #define UPSTREAM_DOH_URL "https://dns.alidns.com/dns-query"
 #endif
-static const char* FW_VER = "cn-2.3.0";   // shown in /stats.json (fw) — bump on changes
+static const char* FW_VER = "cn-2.4.0";   // shown in /stats.json (fw) — bump on changes
 static const IPAddress UPSTREAM(UPSTREAM_IP);
 static const uint16_t DNS_PORT = 53;
 static const char* BLOCKLIST_PATH = "/blocklist.bin";
@@ -333,6 +334,66 @@ static void saveBanned() {
   f.close();
 }
 
+// ---------- profile fog: DNS-noise scheduler (default OFF) ----------
+// Obfuscation (TrackMeNot lineage): plausible, popularity-weighted queries to
+// the same upstream resolver the household really uses drown the RESOLVER-side
+// household profile in noise — defense against DNS-behavior profiling (the
+// NDSS/IWQoS literature shows query sequences alone can identify/track a
+// household). Fire-and-forget on a dedicated UDP socket: no response handling,
+// no loop blocking, ~300B per query. OFF by default — protest-grade tool; the
+// household decides (dashboard toggle + daily-rate knob, persisted in NVS).
+static bool noiseOn = false;
+static uint32_t noiseRate = 1000;      // fake queries per day
+static uint32_t noiseSent = 0, noiseNextAt = 0;
+static WiFiUDP noiseSock;
+static void loadNoiseCfg() {
+  prefs.begin("noise", true);
+  noiseOn = prefs.getUChar("on", 0) != 0;
+  noiseRate = prefs.getUInt("rate", 1000);
+  prefs.end();
+  if (noiseRate < 10) noiseRate = 10;
+  if (noiseRate > 20000) noiseRate = 20000;
+}
+static void saveNoiseCfg() {
+  prefs.begin("noise", false);
+  prefs.putUChar("on", noiseOn ? 1 : 0);
+  prefs.putUInt("rate", noiseRate);
+  prefs.end();
+}
+static void noiseTick() {
+  if (!noiseOn) return;
+  const uint32_t now = millis();
+  if ((int32_t)(now - noiseNextAt) < 0) return;
+  // next gap: exponential with mean 86400000/rate ms (Poisson-ish arrivals;
+  // noiseNextAt==0 on enable fires the first query immediately)
+  float u;
+  do { u = (float)(esp_random() >> 8) / 16777216.0f; } while (u <= 0.0f || u >= 1.0f);
+  noiseNextAt = now + (uint32_t)(-logf(u) * (86400000.0f / noiseRate));
+  // rank: head-heavy draw (p^2.5) over the popularity-ordered corpus
+  const float v = (float)(esp_random() >> 8) / 16777216.0f;
+  int rank = (int)(NOISE_COUNT * v * v * sqrtf(v));
+  if (rank >= NOISE_COUNT) rank = NOISE_COUNT - 1;
+  // minimal A query for that domain, fire-and-forget
+  uint8_t q[80]; int n = 0;
+  const uint16_t tx = (uint16_t)esp_random();
+  q[n++] = tx >> 8; q[n++] = tx & 0xFF; q[n++] = 0x01; q[n++] = 0x00;  // RD
+  q[n++] = 0; q[n++] = 1; q[n++] = 0; q[n++] = 0; q[n++] = 0; q[n++] = 0; q[n++] = 0; q[n++] = 0;
+  const char* p = NOISE_DOMAINS[rank];
+  while (p && *p) {
+    const char* dot = strchr(p, '.');
+    const int L = dot ? (int)(dot - p) : (int)strlen(p);
+    if (n + L + 6 > (int)sizeof(q)) break;
+    q[n++] = (uint8_t)L; memcpy(q + n, p, L); n += L;
+    if (!dot) break;
+    p = dot + 1;
+  }
+  q[n++] = 0; q[n++] = 0; q[n++] = 1; q[n++] = 0; q[n++] = 1;  // A? IN
+  noiseSock.beginPacket(UPSTREAM, UPSTREAM_PORT);
+  noiseSock.write(q, n);
+  noiseSock.endPacket();
+  noiseSent++;
+}
+
 // ---------- client table ----------
 static void getMac(uint32_t ip, uint8_t* mac) {
   memset(mac, 0, 6); ip4_addr_t ipa; ipa.addr = ip;
@@ -549,7 +610,8 @@ static void handleStats() {
   j += "],\"allowhits\":" + String(allowHits) +
        ",\"fw\":\"" + String(FW_VER) + "\"" +
        ",\"doh\":\"" + jesc(dohStatus) + "\",\"dohok\":" + String(dohOkCount) + ",\"dohudp\":" + String(dohUdpCount) +
-       ",\"grave\":" + String(graveHits) + ",\"tcount\":" + String(TELEMETRY_COUNT);
+       ",\"grave\":" + String(graveHits) + ",\"tcount\":" + String(TELEMETRY_COUNT) +
+       ",\"noiseon\":" + (noiseOn ? "true" : "false") + ",\"noise\":" + String(noiseSent) + ",\"noiserate\":" + String(noiseRate);
   j += ",\"log\":[";
   for (int k = 0; k < qlogCount && k < 60; k++) {          // newest first, capped for JSON size
     QEntry& e = qlog[(qlogHead - 1 - k + 2 * QLOG) % QLOG];
@@ -939,7 +1001,7 @@ void setup() {
     Serial.printf("blocklist: %u domains\n", numHashes);
     buildFlashIndex();
   }
-  loadCustom(); loadAllow(); loadBanned(); loadUpdateCfg();
+  loadCustom(); loadAllow(); loadNoiseCfg(); loadBanned(); loadUpdateCfg();
   Serial.printf("custom: %d, allow: %d, banned: %d\n", numCustom, numAllow, numBanned);
   if (numHashes) updateStatus = "loaded: " + String(numHashes) + " domains";
 
@@ -969,13 +1031,20 @@ void setup() {
                     "(they're in the repo's example file). Set real values before trusting this "
                     "device on a network you don't fully control.");
 
-  dnsServer.begin(DNS_PORT); upstreamCli.begin(0);
+  dnsServer.begin(DNS_PORT); upstreamCli.begin(0); noiseSock.begin(0);
   { const char* hdrs[] = { CSRF_HEADER, "Host" }; web.collectHeaders(hdrs, 2); }  // CSRF for requireAuth(); Host for the graveyard 204 responder
   web.on("/", []() { web.send_P(200, "text/html", PAGE); });
   web.on("/stats.json", handleStats);
   web.on("/ban", handleBan);
   web.on("/addblock", []() { if (!requireAuth()) return; addCustom(web.arg("d")); web.send(200, "text/plain", "ok"); });
   web.on("/unblock", []() { if (!requireAuth()) return; removeCustom(web.arg("d")); web.send(200, "text/plain", "ok"); });
+  web.on("/setnoise", []() {
+    if (!requireAuth()) return;
+    if (web.hasArg("on")) { noiseOn = web.arg("on") == "1"; if (noiseOn) noiseNextAt = 0; }
+    if (web.hasArg("rate")) { noiseRate = web.arg("rate").toInt(); if (noiseRate < 10) noiseRate = 10; if (noiseRate > 20000) noiseRate = 20000; }
+    saveNoiseCfg();
+    web.send(200, "text/plain", String(noiseOn ? "on" : "off") + " @ " + noiseRate + "/day");
+  });
   web.on("/addallow", []() { if (!requireAuth()) return; addAllow(web.arg("d")); web.send(200, "text/plain", "ok"); });
   web.on("/delallow", []() { if (!requireAuth()) return; removeAllow(web.arg("d")); web.send(200, "text/plain", "ok"); });
   web.on("/pause", []() {                    // /pause?s=300  (0 or absent = indefinite)
@@ -1035,11 +1104,13 @@ void setup() {
   ArduinoOTA.setPassword(OTA_PASS);      // network OTA was unauthenticated upstream
   ArduinoOTA.begin();
   Serial.printf("DNS :53 + dashboard :80 + OTA up | fw %s | upstream DoH %s (UDP fallback)\n", FW_VER, UPSTREAM_DOH_URL);
+  Serial.printf("fog: %s @ %u/day (corpus %d)\n", noiseOn ? "ON" : "off", noiseRate, NOISE_COUNT);
 }
 
 void loop() {
   ArduinoOTA.handle();
   web.handleClient();
+  noiseTick();
   bool busy = handleDns();
   if (!blockingOn && resumeAt && (int32_t)(millis() - resumeAt) >= 0) { blockingOn = true; resumeAt = 0; }
   if (updateUrl.length()) {

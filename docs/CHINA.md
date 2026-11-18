@@ -81,13 +81,19 @@ tools/build_web_installer.sh      # 重建 docs/*.bin + manifest.json（偏移�
 新鲜物料作为 artifact 供直接下载。
 
 ## 墓园模式（fw cn-2.3.0+）
-
-遥测采集端不再回 `0.0.0.0`（连接拒绝 → SDK 退避重试耗电），而是回答**设备自身 IP**，
 SDK 连到我们的 ：80 会收到秒回的 `204 No Content`——上报方认为成功，安静闭嘴。
 清单来自独立数据仓库 [cn-telemetry-collectors](https://github.com/ichewm/cn-telemetry-collectors)
 （每条带双源共证或探测指纹证据，每周自动重验证，曾一天抓获两个指纹反转）。
 固件侧为编译期内置（`tools/sync_telemetry.sh` 重新生成 `src/telemetry_list.h`），
 清单变化跟随固件 OTA；白名单优先级仍高于墓园。
+
+## 画像迷雾 / Profile fog（fw cn-2.4.0+，实验性，默认关）
+
+TrackMeNot 血统的对抗手段：向上游解析商发送**以假乱真**的 DNS 查询——语料来自数据仓库的
+Majestic top-2000（按流行度定宽存储），抽取时用头重分布（p^2.5）+ 泊松到达间隔，
+真实查询混在其中，解析商侧的"家户画像"信噪比崩塌。对抗的正是 NDSS/IWQoS 文献证明的
+"DNS 查询序列可追踪/画像"。fire-and-forget UDP，每条 ~300B，1000 条/天流量 <1MB。
+**默认关**（观点性工具）：dashboard → DNS NOISE 开关 + 每日速率旋钮（10~20000，NVS 持久化）。
 
 ## 部署
 

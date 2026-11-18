@@ -37,6 +37,10 @@ h2{font-size:14px;color:#8b949e;margin:18px 0 8px}
 <div style=margin-bottom:8px><input id=adom placeholder="mis-blocked.example.com" size=30><button onclick=addAllowDom()>Allow domain</button></div>
 <div style="color:#8b949e;font-size:12px;margin-bottom:8px">allow beats every block source (flash list + custom) for the domain and all its subdomains &mdash; the query-log &ldquo;allow&rdquo; button resolves the blocked parent automatically</div>
 <table id=al><tbody></tbody></table>
+<h2>DNS NOISE &mdash; PROFILE FOG (EXPERIMENTAL)</h2>
+<div style=margin-bottom:8px><button id=fogbtn onclick=toggleFog()>Enable fog</button>
+every <input id=fograte size=4 value=1000> fake queries/day <button onclick=setFogRate()>Set rate</button></div>
+<div style="color:#8b949e;font-size:12px;margin-bottom:18px">obfuscation (TrackMeNot lineage): plausible popularity-weighted queries to the upstream resolver drown the household's DNS profile in noise. OFF by default &mdash; protest-grade. sent: <span id=fogsent>0</span></div>
 <h2>BLOCKLIST &mdash; UPLOAD</h2>
 <form id=upf style=margin-bottom:6px><input type=file id=blf accept=.bin><button>Upload blocklist</button> <span id=upmsg style=color:#8b949e></span></form>
 <div style="color:#8b949e;font-size:12px;margin-bottom:18px">build <code>blocklist.bin</code> with <code>tools/build_blocklist.py</code>, then upload here &mdash; no USB</div>
@@ -78,7 +82,11 @@ cl.tBodies[0].innerHTML=s.custom.map(d=>`<tr><td>${esc(d)}</td><td style=text-al
 al.tBodies[0].innerHTML=s.allow.map(d=>`<tr><td>${esc(d)}</td><td style=text-align:right><button class=rmabtn data-d="${esc(d)}">remove</button></td></tr>`).join('')||'<tr><td style=color:#8b949e>none — an allow entry beats every block, subdomains included</td></tr>';
 if(document.activeElement!=uurl)uurl.value=s.upurl||'';
 if(document.activeElement!=uiv)uiv.value=s.upiv||24;
-ustat.textContent=s.upstat||'—';}
+ustat.textContent=s.upstat||'—';
+fogbtn.textContent=s.noiseon?'Disable fog':'Enable fog';
+fogbtn.style.borderColor=s.noiseon?'#f0883e':'';
+fograte.value=s.noiserate||1000;
+fogsent.textContent=fmt(s.noise||0);}
 function addDom(){let d=dom.value.trim();if(d){fetch('/addblock?d='+encodeURIComponent(d),{headers:CSRF_HDRS}).then(()=>{dom.value='';load()})}}
 function addAllowDom(){let d=adom.value.trim();if(d){fetch('/addallow?d='+encodeURIComponent(d),{headers:CSRF_HDRS}).then(()=>{adom.value='';load()})}}
 ct.addEventListener('click',e=>{if(e.target.classList.contains('ban'))fetch('/ban?ip='+e.target.dataset.ip,{headers:CSRF_HDRS}).then(load)});
@@ -88,6 +96,8 @@ ql.addEventListener('click',e=>{if(e.target.classList.contains('alw'))fetch('/ad
 function saveUpd(){fetch('/setupdate?u='+encodeURIComponent(uurl.value.trim())+'&h='+(parseInt(uiv.value)||24),{headers:CSRF_HDRS}).then(load)}
 function fetchNow(){ustat.textContent='fetching...';fetch('/fetchnow',{headers:CSRF_HDRS}).then(r=>r.text()).then(t=>{ustat.textContent=t;load()})}
 function forgetWifi(){fetch('/forgetwifi',{headers:CSRF_HDRS}).then(r=>r.text()).then(t=>alert(t))}
+function toggleFog(){fetch('/setnoise?on='+(fogbtn.textContent.startsWith('Enable')?1:0),{headers:CSRF_HDRS}).then(load)}
+function setFogRate(){fetch('/setnoise?rate='+(parseInt(fograte.value)||1000),{headers:CSRF_HDRS}).then(load)}
 fwf.onsubmit=async e=>{e.preventDefault();let f=fwb.files[0];if(!f)return;fwmsg.textContent='flashing '+(f.size/1048576).toFixed(2)+' MB...';
 let fd=new FormData();fd.append('f',f);
 try{let r=await fetch('/update',{method:'POST',headers:CSRF_HDRS,body:fd});fwmsg.textContent=r.ok?'✓ rebooting, reconnect in ~15s':'✗ '+await r.text();}

@@ -240,6 +240,10 @@ dig @<c3-ip> github.com        # -> real IP  (forwarded)
   answered with the device's own address and a fast `204 No Content`: SDKs record
   a successful upload and stop retrying, instead of hammering a refused `0.0.0.0`
   with battery-draining backoff
+- ✅ Profile fog (experimental, OFF by default) — popularity-weighted DNS noise
+  toward the upstream resolver (corpus: Majestic top-2000 via the data repo,
+  head-heavy rank draw, Poisson arrivals) drowns the resolver-side household
+  profile — obfuscation against DNS-behavior profiling, TrackMeNot lineage
 - ⬜ Bucketed prefix index — ~18 flash reads/lookup → ~1–2 (upstream issue #3; measured
   numbers, resource math and unfreeze criteria tracked in #1)
 - ⬜ Act as the DHCP server (hand itself out as DNS) for true plug-and-play

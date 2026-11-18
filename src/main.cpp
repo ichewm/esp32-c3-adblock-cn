@@ -22,6 +22,7 @@
 #include "secrets.h"   // WIFI_SSID / WIFI_PASS — used only as a FALLBACK if no creds
                        // have been provisioned via the captive portal (copy secrets.example.h)
 #include "doh_ca.h"    // GlobalSign ECC R5 root — validates the DoH upstream's TLS cert
+#include "telemetry_list.h"  // evidence-verified telemetry endpoints (graveyard mode) — tools/sync_telemetry.sh
 
 // ---- config ----
 #ifndef UPSTREAM_IP
@@ -43,7 +44,7 @@
 #ifndef UPSTREAM_DOH_URL
 #define UPSTREAM_DOH_URL "https://dns.alidns.com/dns-query"
 #endif
-static const char* FW_VER = "cn-2.2.0";   // shown in /stats.json (fw) — bump on changes
+static const char* FW_VER = "cn-2.3.0";   // shown in /stats.json (fw) — bump on changes
 static const IPAddress UPSTREAM(UPSTREAM_IP);
 static const uint16_t DNS_PORT = 53;
 static const char* BLOCKLIST_PATH = "/blocklist.bin";
@@ -293,6 +294,31 @@ static bool isAllowed(const char* domain) {
   }
   return false;
 }
+
+// ---------- graveyard: telemetry endpoints get answered with OUR address ----------
+// A connection-refused 0.0.0.0 makes SDKs retry with backoff (battery/traffic).
+// For collector-ONLY endpoints (verified by cn-telemetry-collectors) we answer the
+// device IP instead; the SDK connects to our :80, gets 204 No Content, records a
+// successful upload and goes quiet. Exact string match, no hash-collision risk;
+// runs only for queries already block-hit (~3% of traffic), and NEVER for banned
+// clients (they keep the plain sinkhole) or allowlisted domains (allow wins).
+static uint32_t graveHits = 0;
+static bool isTelemetry(const char* domain) {
+  const char* p = domain;
+  while (p && *p) {
+    const size_t pl = strlen(p);
+    for (int i = 0; i < TELEMETRY_COUNT; i++) {
+      const char* t = TELEMETRY_DOMAINS[i];
+      // parseQuery() already strips a leading "www." from the QUERY side — strip
+      // it from the LIST side too, or www.google-analytics.com never matches.
+      if (strncmp(t, "www.", 4) == 0) t += 4;
+      if (strlen(t) == pl && memcmp(p, t, pl) == 0) return true;
+    }
+    const char* dot = strchr(p, '.'); if (!dot) break;
+    const char* next = dot + 1; if (!strchr(next, '.')) break; p = next;
+  }
+  return false;
+}
 static bool isBannedIP(uint32_t ip) { for (int i = 0; i < numBanned; i++) if (bannedIP[i] == ip) return true; return false; }
 static void loadBanned() {
   numBanned = 0; File f = LittleFS.open("/banned.txt", "r"); if (!f) return;
@@ -334,10 +360,15 @@ static size_t parseQuery(const uint8_t* pkt, int len, char* out, uint16_t* qtype
   if (o > 4 && strncmp(out, "www.", 4) == 0) { memmove(out, out + 4, o - 3); o -= 4; }
   return o;
 }
-static int buildBlocked(int qend, uint16_t qtype) {
+static int buildBlocked(int qend, uint16_t qtype, const IPAddress* ip = nullptr) {
   buf[2] = 0x81; buf[3] = 0x80; buf[6] = 0; buf[7] = (qtype == 1) ? 1 : 0; buf[8] = 0; buf[9] = 0; buf[10] = 0; buf[11] = 0;
   if (qtype != 1) return qend;
-  const uint8_t ans[] = {0xC0,0x0C, 0,1, 0,1, 0,0,1,0x2C, 0,4, 0,0,0,0};
+  // A-record rdata in network order. ip == nullptr -> sinkhole 0.0.0.0;
+  // graveyard mode passes the device's own address so the SDK connects to OUR
+  // :80 and receives a 204 "upload OK" instead of hammering a refused address.
+  const uint8_t a0 = ip ? (*ip)[0] : 0, a1 = ip ? (*ip)[1] : 0,
+                   a2 = ip ? (*ip)[2] : 0, a3 = ip ? (*ip)[3] : 0;
+  const uint8_t ans[] = {0xC0,0x0C, 0,1, 0,1, 0,0,1,0x2C, 0,4, a0,a1,a2,a3};
   memcpy(buf + qend, ans, sizeof(ans)); return qend + sizeof(ans);
 }
 // Forward to upstream and wait for the reply that actually belongs to THIS query.
@@ -452,9 +483,14 @@ static bool handleDns() {
     bool ban = c && c->banned;
     bool blocked = ban || (blockingOn && dl && numHashes && isBlocked(domain));
     if (blocked && dl && isAllowed(domain)) { blocked = false; allowHits++; }   // allow beats block
+    bool grave = blocked && !ban && dl && isTelemetry(domain);                 // answer with OUR ip
     if (dl) qlogAdd((uint32_t)cip, domain, blocked);
     int rlen;
-    if (blocked) { rlen = buildBlocked(qend, qtype); totalBlocked++; if (c) c->blocked++; }
+    if (blocked) {
+      IPAddress devIp = WiFi.localIP();
+      rlen = grave ? buildBlocked(qend, qtype, &devIp) : buildBlocked(qend, qtype);
+      totalBlocked++; if (c) c->blocked++; if (grave) graveHits++;
+    }
     else         { rlen = forwardUpstream(qlen, qend);     totalAllowed++; if (c) c->allowed++; }
     if (rlen > 0) { dnsServer.beginPacket(cip, cport); dnsServer.write(buf, rlen); dnsServer.endPacket(); }
   }
@@ -512,7 +548,8 @@ static void handleStats() {
   for (int i = 0; i < numAllow; i++) { j += (i ? "," : ""); j += "\"" + jesc(allowDom[i]) + "\""; }
   j += "],\"allowhits\":" + String(allowHits) +
        ",\"fw\":\"" + String(FW_VER) + "\"" +
-       ",\"doh\":\"" + jesc(dohStatus) + "\",\"dohok\":" + String(dohOkCount) + ",\"dohudp\":" + String(dohUdpCount);
+       ",\"doh\":\"" + jesc(dohStatus) + "\",\"dohok\":" + String(dohOkCount) + ",\"dohudp\":" + String(dohUdpCount) +
+       ",\"grave\":" + String(graveHits) + ",\"tcount\":" + String(TELEMETRY_COUNT);
   j += ",\"log\":[";
   for (int k = 0; k < qlogCount && k < 60; k++) {          // newest first, capped for JSON size
     QEntry& e = qlog[(qlogHead - 1 - k + 2 * QLOG) % QLOG];
@@ -933,7 +970,7 @@ void setup() {
                     "device on a network you don't fully control.");
 
   dnsServer.begin(DNS_PORT); upstreamCli.begin(0);
-  { const char* hdrs[] = { CSRF_HEADER }; web.collectHeaders(hdrs, 1); }  // needed for requireAuth()'s CSRF check
+  { const char* hdrs[] = { CSRF_HEADER, "Host" }; web.collectHeaders(hdrs, 2); }  // CSRF for requireAuth(); Host for the graveyard 204 responder
   web.on("/", []() { web.send_P(200, "text/html", PAGE); });
   web.on("/stats.json", handleStats);
   web.on("/ban", handleBan);
@@ -981,6 +1018,17 @@ void setup() {
     if (web.hasArg("u")) updateUrl = web.arg("u");
     if (web.hasArg("h")) { updateIntervalH = web.arg("h").toInt(); if (updateIntervalH < 1) updateIntervalH = 1; }
     saveUpdateCfg(); web.send(200, "text/plain", "ok");
+  });
+  // Graveyard responder: telemetry SDKs arrive here (DNS answered OUR address).
+  // Requests addressed to US (dashboard, mDNS) get the normal 404; anything whose
+  // Host header belongs to a foreign (graveyard) domain gets a fast 204 No
+  // Content — the SDK records a successful upload and stops retrying.
+  web.onNotFound([]() {
+    String host = web.header("Host"); host.toLowerCase();
+    String me = WiFi.localIP().toString(); me.toLowerCase();
+    const bool mine = !host.length() || host.startsWith(me) || host.startsWith("c3adblock");
+    if (mine) { web.send(404, "text/plain", "not found"); return; }
+    web.send(204, "text/plain", "");
   });
   web.begin();
   ArduinoOTA.setHostname("c3adblock");   // pio run -t upload --upload-port c3adblock.local

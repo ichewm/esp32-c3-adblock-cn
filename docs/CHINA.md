@@ -80,6 +80,15 @@ tools/build_web_installer.sh      # 重建 docs/*.bin + manifest.json（偏移�
 并把产物随代码一起提交；CI（build.yml → web-installer job）每次 push 也会构建一份
 新鲜物料作为 artifact 供直接下载。
 
+## 墓园模式（fw cn-2.3.0+）
+
+遥测采集端不再回 `0.0.0.0`（连接拒绝 → SDK 退避重试耗电），而是回答**设备自身 IP**，
+SDK 连到我们的 ：80 会收到秒回的 `204 No Content`——上报方认为成功，安静闭嘴。
+清单来自独立数据仓库 [cn-telemetry-collectors](https://github.com/ichewm/cn-telemetry-collectors)
+（每条带双源共证或探测指纹证据，每周自动重验证，曾一天抓获两个指纹反转）。
+固件侧为编译期内置（`tools/sync_telemetry.sh` 重新生成 `src/telemetry_list.h`），
+清单变化跟随固件 OTA；白名单优先级仍高于墓园。
+
 ## 部署
 
 ```bash

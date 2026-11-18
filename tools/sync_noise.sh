@@ -11,12 +11,15 @@ cd "$(dirname "$0")/.."
 
 URL="https://github.com/ichewm/cn-telemetry-collectors/releases/download/list/noise-corpus.bin"
 TMP=$(mktemp); trap 'rm -f "$TMP"' EXIT
-# gh release download 走 API(新上传的资产 CDN 未传播时也能拉到); curl 作免 gh 环境的兑底
+# 下载优先级: gh API > GitHub raw > Gitee API(私有仓库也可, 凭据运行时取)
 if command -v gh >/dev/null 2>&1 && gh release download list --repo ichewm/cn-telemetry-collectors \
      --pattern 'noise-corpus.bin' --output "$TMP" --clobber 2>/dev/null; then
   :
 else
-  curl -sL -m 120 "$URL" -o "$TMP"
+  TOK=$(printf 'protocol=https\nhost=gitee.com\n\n' | git credential fill 2>/dev/null | awk -F= '/^password/{print $2}')
+  curl -sfL -m 120 "$URL" -o "$TMP" || \
+  curl -sf -m 60 "https://gitee.com/api/v5/repos/hewmbj/cn-telemetry-collectors/raw/noise-corpus.bin?ref=dist&access_token=$TOK" -o "$TMP" || \
+  { echo '错误: 三个下载通道都失败' >&2; exit 1; }
 fi
 
 python3 - "$TMP" <<'EOF'

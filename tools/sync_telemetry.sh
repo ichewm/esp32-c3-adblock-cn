@@ -15,7 +15,17 @@ cd "$(dirname "$0")/.."
 
 URL="https://github.com/ichewm/cn-telemetry-collectors/releases/download/list/telemetry.hosts"
 TMP=$(mktemp); trap 'rm -f "$TMP"' EXIT
-curl -sL -m 60 "$URL" -o "$TMP"
+# 下载优先级: gh API(新资产 CDN 未传播时世能拉) > GitHub raw > Gitee API(私有仓库也可,
+# 凭据从本机 git credential 运行时取, 不写入仓库)
+if command -v gh >/dev/null 2>&1 && gh release download list --repo ichewm/cn-telemetry-collectors \
+     --pattern 'telemetry.hosts' --output "$TMP" --clobber 2>/dev/null; then
+  :
+else
+  TOK=$(printf 'protocol=https\nhost=gitee.com\n\n' | git credential fill 2>/dev/null | awk -F= '/^password/{print $2}')
+  curl -sfL -m 60 "$URL" -o "$TMP" || \
+  curl -sf -m 60 "https://gitee.com/api/v5/repos/hewmbj/cn-telemetry-collectors/raw/telemetry.hosts?ref=dist&access_token=$TOK" -o "$TMP" || \
+  { echo '错误: 三个下载通道都失败' >&2; exit 1; }
+fi
 
 python3 - "$TMP" <<'EOF'
 import re, sys, datetime
